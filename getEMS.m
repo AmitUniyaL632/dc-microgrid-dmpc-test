@@ -13,20 +13,23 @@
 % =========================================================================
 function [zeta_a, zeta_p] = getEMS(Pmax, Pload)
 
-    if Pmax > Pload
-        % PV surplus: AE absorbs excess, FC idle
+    P_bat_max = 5000; % 5 kW power limit for the battery
+    P_net     = Pmax - Pload; % Available energy balance
+
+    if P_net > P_bat_max
+        % Surplus is > 5 kW: Battery charges at max, AE absorbs the rest
         zeta_a = 1;
         zeta_p = 0;
 
-    elseif Pmax < Pload
-        % PV deficit: FC supplies deficit, AE idle
-        zeta_a = 0;
-        zeta_p = 1;
-
-    else
-        % Perfect balance: both idle
+    elseif P_net >= -P_bat_max && P_net <= P_bat_max
+        % Surplus/Deficit is within battery capability: Both H2 systems idle
         zeta_a = 0;
         zeta_p = 0;
+
+    else % P_net < -P_bat_max
+        % Deficit is > 5 kW: Battery discharges at max, FC supplies the rest
+        zeta_a = 0;
+        zeta_p = 1;
     end
 
 end

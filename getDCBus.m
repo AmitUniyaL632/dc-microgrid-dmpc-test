@@ -16,7 +16,15 @@
 %   il    : Load current                      (A)
 % =========================================================================
 
-function [dVdc, il] = getDCBus(Vdc, is, ip, ia, ib_bus, Pload)
+function [dVdc, il] = getDCBus(Vdc, is, ip, ia, varargin)
+
+    if nargin == 5
+        ib_bus = 0;
+        Pload  = varargin{1};
+    else
+        ib_bus = varargin{1};
+        Pload  = varargin{2};
+    end
 
     % --- DC bus parameter (Table 4, Zhu et al.) ---
     Cdc     = 30e-3;    % DC bus capacitance          [F]

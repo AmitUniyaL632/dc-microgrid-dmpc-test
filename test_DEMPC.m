@@ -16,16 +16,20 @@ clc; clear; close all;
 % =========================================================================
 % DISTURBANCE PROFILES
 % =========================================================================
-% Irradiance: ramp from 1000 to 1100 between 0.1-0.2s, step back at 0.3s
-G_profile = @(t) 1000 ...
-    + 100 * min(max((t - 0.1)/0.1, 0), 1) ...   % Ramp up
-    - 100 * double(t >= 0.3);                    % Step down
+% Irradiance: 1000 -> ramp to 1100 -> hold 1100 -> step to 1000 (0.2s intervals)
+G_profile = @(t) 1000 .* (t < 0.2) + ...
+                 (1000 + 100*(t-0.2)/0.2) .* (t >= 0.2 & t < 0.4) + ...
+                 1100 .* (t >= 0.4 & t < 0.6) + ...
+                 1000 .* (t >= 0.6);
 
-% Temperature: fixed (can be varied later)
+% Temperature: fixed
 T_profile = @(t) 25;
 
-% Load: 30 kW stepping to 45 kW at t=0.2s
-Pload_profile = @(t) 30000 + 15000 * double(t >= 0.2);
+% Load: 20kW -> ramp to 40kW -> hold 40kW -> step to 50kW (0.2s intervals)
+Pload_profile = @(t) 20000 .* (t < 0.2) + ...
+                     (20000 + 20000*(t-0.2)/0.2) .* (t >= 0.2 & t < 0.4) + ...
+                     40000 .* (t >= 0.4 & t < 0.6) + ...
+                     50000 .* (t >= 0.6);
 
 % =========================================================================
 % INITIAL STATE
@@ -51,18 +55,19 @@ for kk = 1:length(iae_sw), [vae_sw(kk),~,~,~] = getAE(max(iae_sw(kk),1e-6)); end
 [~, idx_ae] = min(abs(vae_sw .* iae_sw - P_surplus_0));
 iae_init    = iae_sw(idx_ae);
 
-x_init  = [vpv0; Impp0; iae_init; 0; Vdc_nom];
+ib_init  = 0;
+SOC_init = 0.8; % 80% Initial SOC
+x_init   = [vpv0; Impp0; iae_init; 0; Vdc_nom; ib_init; SOC_init];
 
 fprintf('=== DEMPC Simulation Setup ===\n');
 fprintf('  vpv0  = %.2f V\n',   vpv0);
 fprintf('  iL0   = %.2f A\n',   Impp0);
 fprintf('  Ppv0  = %.2f kW\n',  vpv0*Impp0/1000);
-fprintf('  Pload = 30 kW → 45 kW at t=0.2s\n\n');
 
 % =========================================================================
 % RUN DEMPC  (start with short run to verify, then extend t_sim)
 % =========================================================================
-t_sim   = 0.4;      % 400 ms — matches paper simulation duration
+t_sim   = 0.8;      % Extended to 800ms for full 4-stage profile
 
 tic;
 results = runDEMPC(x_init, t_sim, G_profile, T_profile, Pload_profile);
@@ -101,7 +106,7 @@ legend('V_{dc}','V_{dc}^{ref}','Location','best');
 
 % 3. Power balance
 subplot(3,3,3);
-plot(t, (results.Ppv+results.Ppe-results.Pae)/1000, 'b', 'LineWidth', 2); hold on;
+plot(t, (results.Ppv+results.Ppe+results.Pbat-results.Pae)/1000, 'b', 'LineWidth', 2); hold on;
 plot(t, Pl/1000, 'r--', 'LineWidth', 2);
 grid on; xlabel('Time (ms)'); ylabel('Power (kW)');
 title('Power Supply vs Demand');
@@ -126,23 +131,25 @@ ylabel('i_L (A)');
 grid on; xlabel('Time (ms)');
 title('PV Boost Converter States');
 
-% 6. AE and PEMFC subsystem powers
+% 6. H2 and Battery Powers
 subplot(3,3,6);
 plot(t, results.Pae/1000, 'r',  'LineWidth', 2); hold on;
 plot(t, results.Ppe/1000, 'g',  'LineWidth', 2);
+plot(t, results.Pbat/1000, 'm',  'LineWidth', 2);
 grid on; xlabel('Time (ms)'); ylabel('Power (kW)');
-title('AE and PEMFC Powers');
-legend('P_{ae} (AE)','P_{pe} (FC)','Location','best');
+title('Storage & H_2 Powers');
+legend('P_{ae} (AE)','P_{pe} (FC)', 'P_{bat}', 'Location','best');
 
 % 7. Switching signals
 subplot(3,3,7);
 stairs(t, results.U(:,1), 'b',  'LineWidth', 1.5); hold on;
 stairs(t, results.U(:,2), 'r',  'LineWidth', 1.5);
 stairs(t, results.U(:,3), 'g',  'LineWidth', 1.5);
+stairs(t, results.U(:,4), 'm',  'LineWidth', 1.5);
 ylim([-0.05, 1.05]); grid on;
 xlabel('Time (ms)'); ylabel('Duty Cycle');
 title('Control Inputs  [d_s, d_{ae}, d_{pe}]');
-legend('d_s (PV)','d_{ae} (AE)','d_{pe} (FC)','Location','best');
+legend('d_s','d_{ae}','d_{pe}','d_b','Location','best');
 
 % 8. EMS modes
 subplot(3,3,8);

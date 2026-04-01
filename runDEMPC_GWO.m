@@ -35,11 +35,12 @@ function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profi
     Vdc_ref = Vdc_set;
     x       = x_init;
 
-    d_prev  = [0.35; 0.22; 0.30]; % Adaptive grid initial guesses
+    d_prev  = [0.35; 0.22; 0.30; 0.5]; % Adaptive grid initial guesses
 
     % Initialize communication variables from initial conditions
     G0  = G_profile(0);   T0 = T_profile(0);
     vpv0 = x(1);   iL0 = x(2);   iae0 = x(3);   ipe0 = x(4);
+    Vdc0 = x(5);   ib0 = x(6);   SOC0 = x(7);
 
     [ipv0, ~]           = getPVArray(max(vpv0,0), G0, T0, Ns_pv, Np_pv);
     Ppv_comm            = max(vpv0, 0) * ipv0;
@@ -48,6 +49,9 @@ function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profi
     ia_comm             = d_prev(2) * max(iae0, 0);
     [~, Ppe_comm, ~]    = getPEMFC(max(ipe0, 1e-6));
     ip_comm             = (1 - d_prev(3)) * max(ipe0, 0);
+    
+    [Vbat0, ~, Pbat_comm] = getBattery(ib0, SOC0);
+    [~, ib_comm]          = getBidirectionalConverter(ib0, Vbat0, Vdc0, d_prev(4));
 
     % ---- Initialize Hydrogen Tank ----
     V_tank   = 0.1;                                 % Volume [m^3]
@@ -60,8 +64,8 @@ function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profi
     % PRE-ALLOCATE RESULTS
     % =====================================================================
     t_vec       = (0:N_steps-1)' * Ts;
-    X           = zeros(N_steps, 5);
-    U           = zeros(N_steps, 3);
+    X           = zeros(N_steps, 7);
+    U           = zeros(N_steps, 4);
     Ppv_log     = zeros(N_steps, 1);
     Pae_log     = zeros(N_steps, 1);
     Ppe_log     = zeros(N_steps, 1);
@@ -72,6 +76,8 @@ function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profi
     Vdc_ref_log = zeros(N_steps, 1);
     zeta_log    = zeros(N_steps, 2);    % [zeta_a, zeta_p]
     Ptank_log   = zeros(N_steps, 1);
+    Pbat_log    = zeros(N_steps, 1);
+    SOC_log     = zeros(N_steps, 1);
 
     fprintf('Running GWO-DEMPC: %d steps (Ts=%.0f µs, t_sim=%.3f s)...\n', ...
             N_steps, Ts*1e6, t_sim);
@@ -92,7 +98,8 @@ function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profi
         % --- Unpack current states ---
         vpv = x(1);   iL  = x(2);
         iae = x(3);   ipe = x(4);
-        Vdc = x(5);
+        Vdc = x(5);   ib  = x(6);
+        SOC = x(7);
 
         % =================================================================
         % STEP 1: Compute PV maximum power Pmax  (Eq. 7)
@@ -115,17 +122,25 @@ function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profi
         % STEP 4: Local DEMPC for PVS  (always active)
         % =================================================================
         xs  = [vpv; iL; Vdc];
+        Pload_eff = Pload - Pbat_comm; % Effective load for legacy controllers
         [d_s_opt, Ppv_comm, is_comm] = getDEMPC_PVS_GWO(xs, Pmax, ...
-            Ppe_comm, Pae_comm, ip_comm, ia_comm, Pload, Vdc_ref, G_now, T_now);
+            Ppe_comm, Pae_comm, ip_comm, ia_comm, Pload_eff, Vdc_ref, G_now, T_now);
 
         % =================================================================
-        % STEP 5: Local DEMPC for AES  (only when EMS activates it)
+        % STEP 5: Local DEMPC for BESS (always active)
+        % =================================================================
+        xb  = [ib; SOC; Vdc];
+        [d_b_opt, Pbat_comm, ib_comm] = getDEMPC_BESS_GWO(xb, ...
+            Ppv_comm, Ppe_comm, Pae_comm, is_comm, ip_comm, ia_comm, Pload, Vdc_ref);
+
+        % =================================================================
+        % STEP 6: Local DEMPC for AES  (only when EMS activates it)
         % When off: force iae=0, reset communication to zero
         % =================================================================
         if zeta_a == 1
             xa      = [iae; Vdc];
             [d_ae_opt, Pae_comm, ia_comm, ~] = getDEMPC_AES_GWO(xa, ...
-                 Ppv_comm, Ppe_comm, is_comm, ip_comm, Pload, Vdc_ref);
+                 Ppv_comm, Ppe_comm, is_comm, ip_comm, Pload_eff, Vdc_ref);
         else
             d_ae_opt = 0;
             Pae_comm = 0;
@@ -133,13 +148,13 @@ function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profi
         end
 
         % =================================================================
-        % STEP 6: Local DEMPC for PEMFCS  (only when EMS activates it)
+        % STEP 7: Local DEMPC for PEMFCS  (only when EMS activates it)
         % When off: force ipe=0, reset communication to zero
         % =================================================================
         if zeta_p == 1
             xp      = [ipe; Vdc];
             [d_pe_opt, Ppe_comm, ip_comm] = getDEMPC_PEMFCS_GWO(xp, ...
-                 Ppv_comm, Pae_comm, is_comm, ia_comm, Pload, Vdc_ref);
+                 Ppv_comm, Pae_comm, is_comm, ia_comm, Pload_eff, Vdc_ref);
         else
             d_pe_opt = 0;
             Ppe_comm = 0;
@@ -147,9 +162,9 @@ function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profi
         end
 
         % =================================================================
-        % STEP 7: Apply optimal control to plant  (forward Euler integration)
+        % STEP 8: Apply optimal control to plant  (forward Euler integration)
         % =================================================================
-        u   = [d_s_opt; d_ae_opt; d_pe_opt];
+        u   = [d_s_opt; d_ae_opt; d_pe_opt; d_b_opt];
         w   = [G_now; T_now; Pload];
 
         Ts_sub  = Ts / 4;
@@ -161,6 +176,7 @@ function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profi
             x(3)        = max(x(3), 0);
             x(4)        = max(x(4), 0);
             x(5)        = max(x(5), 1);
+            x(7)        = max(min(x(7), 1), 0); % Bound SOC between 0 and 1
         end
 
         % When subsystem is off, reset its state to prevent uncontrolled buildup
@@ -172,12 +188,12 @@ function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profi
         end
 
         % =================================================================
-        % STEP 8: Update previous switch signals
+        % STEP 9: Update previous switch signals
         % =================================================================
         d_prev = u;
 
         % =================================================================
-        % STEP 9: Log results
+        % STEP 10: Log results
         % =================================================================
         % Update Tank state
         [P_tank, n_H2]  = getHydrogenTank(n_H2, aux.NH2, aux.qH2, Ts);
@@ -194,12 +210,14 @@ function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profi
         Vdc_ref_log(k)  = Vdc_ref;
         zeta_log(k,:)   = [zeta_a, zeta_p];
         Ptank_log(k)    = P_tank;
+        Pbat_log(k)     = aux.Pbat;
+        SOC_log(k)      = x(7);
 
         % Progress report
         if mod(k, report_every) == 0
-            Perror = aux.Ppv + aux.Ppe - Pload - aux.Pae;
-            fprintf('  %3d%% | t=%.4fs | Vdc=%.1fV | Ppv=%.2fkW | Pae=%.2fkW | Pfc=%.2fkW | Perror=%.0fW | NH2=%.2fmmol/s | qH2=%.2fmmol/s | EMS=[%d,%d]\n', ...
-                round(100*k/N_steps), t_now, x(5), aux.Ppv/1000, aux.Pae/1000, aux.Ppe/1000, Perror, aux.NH2*1000, aux.qH2*1000, zeta_a, zeta_p);
+            Perror = aux.Ppv + aux.Ppe + aux.Pbat - Pload - aux.Pae;
+            fprintf('  %3d%% | t=%.4fs | Vdc=%.1fV | Ppv=%.2fkW | Pbat=%.2fkW | Pae=%.2fkW | Pfc=%.2fkW | Perror=%.0fW | EMS=[%d,%d]\n', ...
+                round(100*k/N_steps), t_now, x(5), aux.Ppv/1000, aux.Pbat/1000, aux.Pae/1000, aux.Ppe/1000, Perror, zeta_a, zeta_p);
         end
     end
 
@@ -207,8 +225,8 @@ function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profi
     % PACKAGE RESULTS
     % =====================================================================
     results.t       = t_vec;
-    results.X       = X;           % [vpv, iL, iae, ipe, Vdc]
-    results.U       = U;           % [Ss, Sae, Spe]
+    results.X       = X;           % [vpv, iL, iae, ipe, Vdc, ib, SOC]
+    results.U       = U;           % [Ss, Sae, Spe, Sb]
     results.Ppv     = Ppv_log;
     results.Pae     = Pae_log;
     results.Ppe     = Ppe_log;
@@ -219,6 +237,8 @@ function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profi
     results.Vdc_ref = Vdc_ref_log;
     results.zeta    = zeta_log;
     results.Ptank   = Ptank_log;
+    results.Pbat    = Pbat_log;
+    results.SOC     = SOC_log;
     results.Ts      = Ts;
     results.total_H2_prod = sum(NH2_log) * Ts; % Total H2 produced [mol]
     results.total_H2_cons = sum(qH2_log) * Ts; % Total H2 consumed [mol]

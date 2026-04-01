@@ -13,19 +13,23 @@
 % clear; clc; close all;
 
 % ---- Simulation Scenario ----
-t_sim = 0.4; % Simulation time in seconds, matching test_DEMPC
+t_sim = 0.8; % Extended to 800ms for full 4-stage profile
 
 % ---- Disturbance Profiles (matching test_DEMPC.m) ----
-% Irradiance: ramp from 1000 to 1100 between 0.1-0.2s, step back at 0.3s
-G_profile = @(t) 1000 ...
-    + 100 * min(max((t - 0.1)/0.1, 0), 1) ...   % Ramp up
-    - 100 * double(t >= 0.3);                    % Step down
+% Irradiance: 1000 -> ramp to 1100 -> hold 1100 -> step to 1000 (0.2s intervals)
+G_profile = @(t) 1000 .* (t < 0.2) + ...
+                 (1000 + 100*(t-0.2)/0.2) .* (t >= 0.2 & t < 0.4) + ...
+                 1100 .* (t >= 0.4 & t < 0.6) + ...
+                 1000 .* (t >= 0.6);
 
 % Temperature: fixed
 T_profile = @(t) 25;
 
-% Load: 30 kW stepping to 45 kW at t=0.2s
-Pload_profile = @(t) 30000 + 15000 * double(t >= 0.2);
+% Load: 20kW -> ramp to 40kW -> hold 40kW -> step to 50kW (0.2s intervals)
+Pload_profile = @(t) 20000 .* (t < 0.2) + ...
+                     (20000 + 20000*(t-0.2)/0.2) .* (t >= 0.2 & t < 0.4) + ...
+                     40000 .* (t >= 0.4 & t < 0.6) + ...
+                     50000 .* (t >= 0.6);
 
 % ---- Initial State Calculation (matching test_DEMPC.m) ----
 Ns_pv   = 5;    Np_pv = 20;
@@ -48,7 +52,9 @@ iae_sw      = linspace(0, 500, 5000);
 [~, idx_ae] = min(abs(vae_sw .* iae_sw - P_surplus_0));
 iae_init    = iae_sw(idx_ae);
 
-x_init  = [vpv0; Impp0; iae_init; 0; Vdc_nom];
+ib_init  = 0;
+SOC_init = 0.8; % 80% Initial SOC
+x_init   = [vpv0; Impp0; iae_init; 0; Vdc_nom; ib_init; SOC_init];
 
 % =========================================================================
 % RUN SIMULATION
@@ -82,41 +88,51 @@ ylim([270 330]);
 % Figure 2: Power Profiles
 figure('Name', 'GWO-DMPC: Power Profiles');
 
-subplot(3,1,1);
+subplot(4,1,1);
 plot(results_gwo.t, results_gwo.Ppv/1000, 'b-', 'LineWidth', 1.5);
 hold on; plot(results_gwo.t, results_gwo.Pmax/1000, 'r--', 'LineWidth', 1.5);
 grid on; title('PV Power (P_{pv})'); ylabel('Power (kW)');
 legend('P_{pv} (GWO)', 'P_{max}');
 
-subplot(3,1,2);
+subplot(4,1,2);
 plot(results_gwo.t, results_gwo.Pae/1000, 'b-', 'LineWidth', 1.5);
 grid on; title('Electrolyzer Power (P_{ae})'); ylabel('Power (kW)');
 legend('P_{ae} (GWO)');
 
-subplot(3,1,3);
+subplot(4,1,3);
 plot(results_gwo.t, results_gwo.Ppe/1000, 'b-', 'LineWidth', 1.5);
 grid on; title('Fuel Cell Power (P_{pe})'); ylabel('Power (kW)');
-xlabel('Time (s)');
 legend('P_{pe} (GWO)');
+
+subplot(4,1,4);
+plot(results_gwo.t, results_gwo.Pbat/1000, 'm-', 'LineWidth', 1.5);
+grid on; title('Battery Power (P_{bat})'); ylabel('Power (kW)');
+xlabel('Time (s)');
+legend('P_{bat} (GWO)');
 
 % Figure 3: Duty Cycles
 figure('Name', 'GWO-DMPC: Duty Cycles');
 
-subplot(3,1,1);
+subplot(4,1,1);
 stairs(results_gwo.t, results_gwo.U(:,1), 'b-', 'LineWidth', 1.5);
 grid on; title('PV Duty Cycle (S_s)'); ylabel('Duty Cycle');
 legend('d_s (GWO)');
 
-subplot(3,1,2);
+subplot(4,1,2);
 stairs(results_gwo.t, results_gwo.U(:,2), 'b-', 'LineWidth', 1.5);
 grid on; title('AE Duty Cycle (S_{ae})'); ylabel('Duty Cycle');
 legend('d_{ae} (GWO)');
 
-subplot(3,1,3);
+subplot(4,1,3);
 stairs(results_gwo.t, results_gwo.U(:,3), 'b-', 'LineWidth', 1.5);
 grid on; title('FC Duty Cycle (S_{pe})'); ylabel('Duty Cycle');
-xlabel('Time (s)');
 legend('d_{pe} (GWO)');
+
+subplot(4,1,4);
+stairs(results_gwo.t, results_gwo.U(:,4), 'm-', 'LineWidth', 1.5);
+grid on; title('Battery Duty Cycle (S_b)'); ylabel('Duty Cycle');
+xlabel('Time (s)');
+legend('d_b (GWO)');
 
 % Figure 4: Hydrogen Tank Pressure
 figure('Name', 'GWO-DMPC: Hydrogen Tank Pressure');
@@ -125,6 +141,15 @@ grid on;
 title('Hydrogen Tank Pressure');
 xlabel('Time (s)');
 ylabel('Pressure (bar)');
+xlim([0 results_gwo.t(end)]);
+
+% Figure 5: Battery SOC
+figure('Name', 'GWO-DMPC: Battery SOC');
+plot(results_gwo.t, results_gwo.SOC * 100, 'm-', 'LineWidth', 1.5);
+grid on;
+title('Battery State of Charge');
+xlabel('Time (s)');
+ylabel('SOC (%)');
 xlim([0 results_gwo.t(end)]);
 
 % Calculate and display performance metrics
