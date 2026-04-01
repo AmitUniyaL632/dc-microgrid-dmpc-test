@@ -8,6 +8,7 @@
 %   is    : PV converter output current       (A)   [from getPVBoostConverter]
 %   ip    : PEMFC converter output current    (A)   [from getPEMFCBoostConverter]
 %   ia    : AE converter input current        (A)   [from getAEBuckConverter]
+%   ib_bus: Battery converter output current  (A)   [from getBidirectionalConverter]
 %   Pload : Load power demand                 (W)   [disturbance]
 %
 % Output:
@@ -15,7 +16,7 @@
 %   il    : Load current                      (A)
 % =========================================================================
 
-function [dVdc, il] = getDCBus(Vdc, is, ip, ia, Pload)
+function [dVdc, il] = getDCBus(Vdc, is, ip, ia, ib_bus, Pload)
 
     % --- DC bus parameter (Table 4, Zhu et al.) ---
     Cdc     = 30e-3;    % DC bus capacitance          [F]
@@ -26,8 +27,8 @@ function [dVdc, il] = getDCBus(Vdc, is, ip, ia, Pload)
     il          = Pload / Vdc_safe;
 
     % --- DC bus state equation (Eq. 10) ---
-    % Cdc * dVdc/dt = is + ip - ia - il
-    dVdc    = (is + ip - ia - il) / Cdc;
+    % Cdc * dVdc/dt = is + ip + ib_bus - ia - il
+    dVdc    = (is + ip + ib_bus - ia - il) / Cdc;
 
 end
 %%
