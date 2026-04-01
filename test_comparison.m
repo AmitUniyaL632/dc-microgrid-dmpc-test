@@ -123,6 +123,18 @@ grid on; title('FC Duty Cycle (S_{pe})'); ylabel('Duty Cycle');
 xlabel('Time (s)');
 legend('DMPC', 'GWO');
 
+% Figure 4: Hydrogen Tank Pressure
+figure('Name', 'Hydrogen Tank Pressure Comparison');
+plot(results_dempc.t, results_dempc.Ptank / 1e5, 'b-', 'LineWidth', 1.5);
+hold on;
+plot(results_gwo.t, results_gwo.Ptank / 1e5, 'r--', 'LineWidth', 1.5);
+grid on;
+title('Hydrogen Tank Pressure');
+xlabel('Time (s)');
+ylabel('Pressure (bar)');
+legend('DMPC (Grid Search)', 'DMPC (GWO)');
+xlim([0 t_sim]);
+
 % Calculate and display performance metrics
 Vdc_IAE_dempc = sum(abs(results_dempc.X(:,5) - results_dempc.Vdc_ref)) * results_dempc.Ts;
 Vdc_IAE_gwo   = sum(abs(results_gwo.X(:,5) - results_gwo.Vdc_ref)) * results_gwo.Ts;
@@ -134,4 +146,6 @@ fprintf('Total H2 Produced (DMPC): %.6f mol\n', results_dempc.total_H2_prod);
 fprintf('Total H2 Produced (GWO):  %.6f mol\n', results_gwo.total_H2_prod);
 fprintf('Total H2 Consumed (DMPC): %.6f mol\n', results_dempc.total_H2_cons);
 fprintf('Total H2 Consumed (GWO):  %.6f mol\n', results_gwo.total_H2_cons);
+fprintf('Final Tank Pressure (DMPC): %.4f bar\n', results_dempc.Ptank(end) / 1e5);
+fprintf('Final Tank Pressure (GWO):  %.4f bar\n', results_gwo.Ptank(end) / 1e5);
 fprintf('---------------------------\n');

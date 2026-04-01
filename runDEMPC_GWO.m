@@ -49,6 +49,13 @@ function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profi
     [~, Ppe_comm, ~]    = getPEMFC(max(ipe0, 1e-6));
     ip_comm             = (1 - d_prev(3)) * max(ipe0, 0);
 
+    % ---- Initialize Hydrogen Tank ----
+    V_tank   = 0.1;                                 % Volume [m^3]
+    T_tank   = 298.15;                              % Temp [K]
+    R_gas    = 8.31446;                             % Gas constant
+    P_tank0  = 10 * 1e5;                            % Init pressure (10 bar)
+    n_H2     = P_tank0 * V_tank / (R_gas * T_tank); % Init moles
+
     % =====================================================================
     % PRE-ALLOCATE RESULTS
     % =====================================================================
@@ -64,6 +71,7 @@ function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profi
     qH2_log     = zeros(N_steps, 1);
     Vdc_ref_log = zeros(N_steps, 1);
     zeta_log    = zeros(N_steps, 2);    % [zeta_a, zeta_p]
+    Ptank_log   = zeros(N_steps, 1);
 
     fprintf('Running GWO-DEMPC: %d steps (Ts=%.0f µs, t_sim=%.3f s)...\n', ...
             N_steps, Ts*1e6, t_sim);
@@ -171,6 +179,9 @@ function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profi
         % =================================================================
         % STEP 9: Log results
         % =================================================================
+        % Update Tank state
+        [P_tank, n_H2]  = getHydrogenTank(n_H2, aux.NH2, aux.qH2, Ts);
+
         X(k,:)          = x';
         U(k,:)          = u';
         Ppv_log(k)      = aux.Ppv;
@@ -182,6 +193,7 @@ function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profi
         Pmax_log(k)     = Pmax;
         Vdc_ref_log(k)  = Vdc_ref;
         zeta_log(k,:)   = [zeta_a, zeta_p];
+        Ptank_log(k)    = P_tank;
 
         % Progress report
         if mod(k, report_every) == 0
@@ -206,6 +218,7 @@ function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profi
     results.qH2     = qH2_log;
     results.Vdc_ref = Vdc_ref_log;
     results.zeta    = zeta_log;
+    results.Ptank   = Ptank_log;
     results.Ts      = Ts;
     results.total_H2_prod = sum(NH2_log) * Ts; % Total H2 produced [mol]
     results.total_H2_cons = sum(qH2_log) * Ts; % Total H2 consumed [mol]

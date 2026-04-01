@@ -118,6 +118,15 @@ grid on; title('FC Duty Cycle (S_{pe})'); ylabel('Duty Cycle');
 xlabel('Time (s)');
 legend('d_{pe} (GWO)');
 
+% Figure 4: Hydrogen Tank Pressure
+figure('Name', 'GWO-DMPC: Hydrogen Tank Pressure');
+plot(results_gwo.t, results_gwo.Ptank / 1e5, 'b-', 'LineWidth', 1.5);
+grid on;
+title('Hydrogen Tank Pressure');
+xlabel('Time (s)');
+ylabel('Pressure (bar)');
+xlim([0 results_gwo.t(end)]);
+
 % Calculate and display performance metrics
 Vdc_IAE_gwo   = sum(abs(results_gwo.X(:,5) - results_gwo.Vdc_ref)) * results_gwo.Ts;
 
@@ -126,4 +135,5 @@ fprintf('Simulation Wall-Clock Time:       %.2f seconds\n', elapsed_time);
 fprintf('Vdc Integral Absolute Error (IAE): %.4f\n', Vdc_IAE_gwo);
 fprintf('Total H2 Produced:                 %.6f mol\n', results_gwo.total_H2_prod);
 fprintf('Total H2 Consumed:                 %.6f mol\n', results_gwo.total_H2_cons);
+fprintf('Final Tank Pressure:               %.4f bar\n', results_gwo.Ptank(end) / 1e5);
 fprintf('-------------------------------------\n');

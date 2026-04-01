@@ -161,6 +161,15 @@ grid on; xlabel('Time (ms)'); ylabel('Rate (mmol/s)');
 title('H_2 Production (AE) & Consumption (FC)');
 legend('N_{H2}','q_{H2}','Location','best');
 
+% 10. Hydrogen Tank Pressure (New Figure)
+figure('Color','w','Position',[50 50 600 400]);
+plot(t, results.Ptank / 1e5, 'b', 'LineWidth', 2);
+grid on;
+xlabel('Time (ms)');
+ylabel('Pressure (bar)');
+title('Hydrogen Tank Pressure');
+xlim([0 t(end)]);
+
 % figure('Color','w','Position',[30 30 1400 900]);
 % sgtitle('Switching signals', ...
 %         'FontSize', 14, 'FontWeight', 'bold');
@@ -202,3 +211,4 @@ fprintf('AE active fraction: %.2f %%\n', 100*mean(results.zeta(:,1)));
 fprintf('FC active fraction: %.2f %%\n', 100*mean(results.zeta(:,2)));
 fprintf('Total H2 produced : %.6f mol\n', results.total_H2_prod);
 fprintf('Total H2 consumed : %.6f mol\n', results.total_H2_cons);
+fprintf('Final Tank Press. : %.4f bar\n', results.Ptank(end) / 1e5);
