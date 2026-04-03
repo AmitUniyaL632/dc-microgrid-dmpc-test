@@ -32,11 +32,12 @@ function [db_opt, Pbat_comm, ib_comm] = getDEMPC_BESS(xb, db_prev, Ppv_comm, Ppe
     db_set = linspace(0.1, 0.9, 11); % Limits duty cycle to avoid saturation
     Pbat_max = 5000; % 5 kW safety limit
 
-    % Weights
-    w_v   = 1.0;
-    w_du  = 0.1;
-    w_p   = 0.5;
-    w_lim = 10.0; % High penalty for exceeding power limit
+    % Normalized Weights (Matching CMPC scale)
+    w_v   = 20000; % Heavily weight Vdc regulation
+    w_du  = 100;
+    w_p   = 5000;
+    w_lim = 50000; % High penalty for exceeding power limit
+    w_soc = 50000; % High penalty for violating SOC limits
 
     J_min = inf;
     db_opt = db_prev;
@@ -56,12 +57,26 @@ function [db_opt, Pbat_comm, ib_comm] = getDEMPC_BESS(xb, db_prev, Ppv_comm, Ppe
             Vdc_pred = Vdc_pred + Ts * dVdc;
 
             Pbal = Ppv_comm + Ppe_comm + Pbat - Pae_comm - Pload;
-            Pbat_penalty = max(0, abs(Pbat) - Pbat_max)^2;
+            Pbat_penalty = max(0, abs(Pbat) - Pbat_max);
 
-            J_seq = J_seq + w_v * (Vdc_pred - Vdc_ref)^2 ...
-                          + w_du * (db - db_last)^2 ...
-                          + w_p * Pbal^2 ...
-                          + w_lim * Pbat_penalty;
+            SOC_penalty = 0;
+            if SOC_pred >= 0.90 && Pbat < 0
+                SOC_penalty = abs(Pbat); % Penalize charging when full
+            elseif SOC_pred <= 0.20 && Pbat > 0
+                SOC_penalty = abs(Pbat); % Penalize discharging when empty
+            end
+
+            ls_v   = ((Vdc_pred - Vdc_ref) / Vdc_ref)^2;
+            ls_du  = (db - db_last)^2;
+            ls_p   = (Pbal / max(Pload, 1))^2;
+            ls_lim = (Pbat_penalty / Pbat_max)^2;
+            ls_soc = (SOC_penalty / Pbat_max)^2;
+
+            J_seq = J_seq + w_v * ls_v ...
+                          + w_du * ls_du ...
+                          + w_p * ls_p ...
+                          + w_lim * ls_lim ...
+                          + w_soc * ls_soc;
             db_last = db;
         end
 

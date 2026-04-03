@@ -6,29 +6,32 @@
 % Inputs:
 %   Pmax  : PV maximum available power    [W]
 %   Pload : Load power demand             [W]
+%   SOC   : Battery State of Charge       [0 to 1]
 %
 % Outputs:
 %   zeta_a : AES  operational mode  (1=ON, 0=OFF)
 %   zeta_p : PEMFCS operational mode (1=ON, 0=OFF)
 % =========================================================================
-function [zeta_a, zeta_p] = getEMS(Pmax, Pload)
+function [zeta_a, zeta_p] = getEMS(Pmax, Pload, SOC)
 
     P_bat_max = 5000; % 5 kW power limit for the battery
+    SOC_min   = 0.20; % 20% minimum SOC
+    SOC_max   = 0.90; % 90% maximum SOC
     P_net     = Pmax - Pload; % Available energy balance
 
-    if P_net > P_bat_max
-        % Surplus is > 5 kW: Battery charges at max, AE absorbs the rest
+    % Default state: Both H2 systems idle
+    zeta_a = 0;
+    zeta_p = 0;
+
+    % Evaluate surplus conditions
+    if P_net > P_bat_max || (P_net > 0 && SOC >= SOC_max)
+        % AE absorbs if surplus > 5 kW OR if battery is full
         zeta_a = 1;
-        zeta_p = 0;
+    end
 
-    elseif P_net >= -P_bat_max && P_net <= P_bat_max
-        % Surplus/Deficit is within battery capability: Both H2 systems idle
-        zeta_a = 0;
-        zeta_p = 0;
-
-    else % P_net < -P_bat_max
-        % Deficit is > 5 kW: Battery discharges at max, FC supplies the rest
-        zeta_a = 0;
+    % Evaluate deficit conditions
+    if P_net < -P_bat_max || (P_net < 0 && SOC <= SOC_min)
+        % FC supplies if deficit > 5 kW OR if battery is empty
         zeta_p = 1;
     end
 

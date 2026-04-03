@@ -110,7 +110,7 @@ function results = runDEMPC(x_init, t_sim, G_profile, T_profile, Pload_profile)
         % =================================================================
         % STEP 2: EMS — determine operational modes  (Eq. 32)
         % =================================================================
-        [zeta_a, zeta_p] = getEMS(Pmax, Pload);
+        [zeta_a, zeta_p] = getEMS(Pmax, Pload, SOC);
 
         % =================================================================
         % STEP 3: Vdc reference — gradual approach  (Eq. 34)
@@ -130,8 +130,10 @@ function results = runDEMPC(x_init, t_sim, G_profile, T_profile, Pload_profile)
         % STEP 5: Local DEMPC for BESS (always active)
         % =================================================================
         xb  = [ib; SOC; Vdc];
+        Pae_comm_temp = 0;
+        Ppe_comm_temp = 0;
         [d_b_opt, Pbat_comm, ib_comm] = getDEMPC_BESS(xb, d_prev(4), ...
-            Ppv_comm, Ppe_comm, Pae_comm, is_comm, ip_comm, ia_comm, Pload, Vdc_ref);
+            Ppv_comm, Ppe_comm_temp, Pae_comm_temp, is_comm, ip_comm, ia_comm, Pload, Vdc_ref);
 
         % =================================================================
         % STEP 6: Local DEMPC for AES  (only when EMS activates it)
@@ -179,12 +181,12 @@ function results = runDEMPC(x_init, t_sim, G_profile, T_profile, Pload_profile)
             x(7)        = max(min(x(7), 1), 0); % Bound SOC between 0 and 1
         end
 
-        % When subsystem is off, reset its state to prevent uncontrolled buildup
+        % When subsystem is off, forcefully zero the state (contactor open)
         if zeta_a == 0
-            x(3) = x(3) * 0.98;
+            x(3) = 0;
         end
         if zeta_p == 0
-            x(4) = x(4) * 0.98;
+            x(4) = 0;
         end
 
         % =================================================================

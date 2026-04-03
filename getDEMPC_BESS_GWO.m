@@ -20,8 +20,8 @@ function [db_opt, Pbat_comm, ib_comm] = getDEMPC_BESS_GWO(xb, Ppv_comm, Ppe_comm
     dim = Np;
     lowerBound = 0.1;
     upperBound = 0.9;
-    maxIter = 10;
-    wolfCount = 5;
+    maxIter = 20;   % Increased from 10
+    wolfCount = 10; % Increased from 5
 
     % Run GWO
     [bestSeq, ~] = optimizeDutyCycleGWO(costFunc, dim, lowerBound, upperBound, maxIter, wolfCount);
@@ -34,10 +34,11 @@ function [db_opt, Pbat_comm, ib_comm] = getDEMPC_BESS_GWO(xb, Ppv_comm, Ppe_comm
 end
 
 function J = evaluateCostBESS(U_seq, ib, SOC, Vdc, Ppv, Ppe, Pae, is, ip, ia, Pload, Vdc_ref, Ts, Np)
-    w_v   = 1.0;
-    w_du  = 0.1;
-    w_p   = 0.5;
-    w_lim = 10.0;
+    w_v   = 20000;
+    w_du  = 100;
+    w_p   = 5000;
+    w_lim = 50000;
+    w_soc = 50000;
     Pbat_max = 5000; % 5 kW safety limit
 
     J = 0;
@@ -54,9 +55,22 @@ function J = evaluateCostBESS(U_seq, ib, SOC, Vdc, Ppv, Ppe, Pae, is, ip, ia, Pl
         Vdc = Vdc + Ts * dVdc;
 
         Pbal = Ppv + Ppe + Pbat - Pae - Pload;
-        Pbat_penalty = max(0, abs(Pbat) - Pbat_max)^2;
+        Pbat_penalty = max(0, abs(Pbat) - Pbat_max);
 
-        J = J + w_v * (Vdc - Vdc_ref)^2 + w_du * (db - db_last)^2 + w_p * Pbal^2 + w_lim * Pbat_penalty;
+        SOC_penalty = 0;
+        if SOC >= 0.90 && Pbat < 0
+            SOC_penalty = abs(Pbat); % Penalize charging when full
+        elseif SOC <= 0.20 && Pbat > 0
+            SOC_penalty = abs(Pbat); % Penalize discharging when empty
+        end
+
+        ls_v   = ((Vdc - Vdc_ref) / Vdc_ref)^2;
+        ls_du  = (db - db_last)^2;
+        ls_p   = (Pbal / max(Pload, 1))^2;
+        ls_lim = (Pbat_penalty / Pbat_max)^2;
+        ls_soc = (SOC_penalty / Pbat_max)^2;
+
+        J = J + w_v * ls_v + w_du * ls_du + w_p * ls_p + w_lim * ls_lim + w_soc * ls_soc;
         db_last = db;
     end
 end

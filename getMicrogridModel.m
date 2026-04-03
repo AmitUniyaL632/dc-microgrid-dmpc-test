@@ -92,12 +92,22 @@ function [xdot, aux] = getMicrogridModel(x, u, w)
     % =====================================================================
     [diae, ia, vae, Pae, NH2] = getAEBuckConverter(iae, Vdc, Sae);
 
+    % Virtual contactor: if EMS disabled AE (Sae == 0), completely isolate it
+    if Sae == 0
+        diae = 0; ia = 0; Pae = 0; NH2 = 0;
+    end
+
     % =====================================================================
     % SUBSYSTEM 3: PEMFC Boost Converter                         [Eq. 28]
     % State updated: x(4)=ipe
     % Also produces: ip (current injected to DC bus), vpe, Ppe, qH2
     % =====================================================================
     [dipe, ip, vpe, Ppe, qH2] = getPEMFCBoostConverter(ipe, Vdc, Spe);
+
+    % Virtual contactor: if EMS disabled FC (Spe == 0), completely isolate it
+    if Spe == 0
+        dipe = 0; ip = 0; Ppe = 0; qH2 = 0;
+    end
 
     % =====================================================================
     % SUBSYSTEM 4: Battery & Bidirectional Converter
