@@ -31,6 +31,11 @@ Pload_profile = @(t) 20000 .* (t < 0.2) + ...
                      40000 .* (t >= 0.4 & t < 0.6) + ...
                      50000 .* (t >= 0.6);
 
+% Wind Speed: 10m/s -> step to 12m/s -> hold -> step to 8m/s
+v_w_profile = @(t) 10 .* (t < 0.2) + ...
+                   12 .* (t >= 0.2 & t < 0.6) + ...
+                   8  .* (t >= 0.6);
+
 % =========================================================================
 % INITIAL STATE
 % =========================================================================
@@ -57,7 +62,13 @@ iae_init    = iae_sw(idx_ae);
 
 ib_init  = 0;
 SOC_init = 0.8; % 80% Initial SOC
-x_init   = [vpv0; Impp0; iae_init; 0; Vdc_nom; ib_init; SOC_init];
+
+% Find initial WTG state
+v_w0 = v_w_profile(0);
+vwt0 = 400; % Default initial voltage
+[iLw0, ~] = getWindTurbine(vwt0, v_w0);
+
+x_init   = [vpv0; Impp0; iae_init; 0; Vdc_nom; ib_init; SOC_init; vwt0; iLw0];
 
 fprintf('=== DEMPC Simulation Setup ===\n');
 fprintf('  vpv0  = %.2f V\n',   vpv0);
@@ -70,7 +81,7 @@ fprintf('  Ppv0  = %.2f kW\n',  vpv0*Impp0/1000);
 t_sim   = 0.8;      % Extended to 800ms for full 4-stage profile
 
 tic;
-results = runDEMPC(x_init, t_sim, G_profile, T_profile, Pload_profile);
+results = runDEMPC(x_init, t_sim, G_profile, T_profile, Pload_profile, v_w_profile);
 elapsed = toc;
 fprintf('Wall-clock time: %.1f s\n', elapsed);
 
@@ -106,19 +117,20 @@ legend('V_{dc}','V_{dc}^{ref}','Location','best');
 
 % 3. Power balance
 subplot(3,3,3);
-plot(t, (results.Ppv+results.Ppe+results.Pbat-results.Pae)/1000, 'b', 'LineWidth', 2); hold on;
+plot(t, (results.Ppv+results.Pwt+results.Ppe+results.Pbat-results.Pae)/1000, 'b', 'LineWidth', 2); hold on;
 plot(t, Pl/1000, 'r--', 'LineWidth', 2);
 grid on; xlabel('Time (ms)'); ylabel('Power (kW)');
 title('Power Supply vs Demand');
 legend('Supply','P_{load}','Location','best');
 
-% 4. MPPT tracking
+% 4. MPPT tracking (PV + WTG)
 subplot(3,3,4);
 plot(t, results.Ppv/1000, 'b', 'LineWidth', 2); hold on;
+plot(t, results.Pwt/1000, 'g', 'LineWidth', 2);
 plot(t, results.Pmax/1000, 'r--', 'LineWidth', 1.5);
 grid on; xlabel('Time (ms)'); ylabel('Power (kW)');
-title('PV Power vs P_{max}  (MPPT)');
-legend('P_{pv}','P_{max}','Location','best');
+title('PV & WTG Power vs P_{max}');
+legend('P_{pv}', 'P_{wt}', 'P_{max}','Location','best');
 
 % 5. PV converter states
 subplot(3,3,5);

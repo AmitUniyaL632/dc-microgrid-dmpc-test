@@ -33,6 +33,11 @@ Pload_profile = @(t) 20000 .* (t < 0.2) + ...
                      40000 .* (t >= 0.4 & t < 0.6) + ...
                      50000 .* (t >= 0.6);
 
+% Wind Speed: 10m/s -> step to 12m/s -> hold -> step to 8m/s
+v_w_profile = @(t) 10 .* (t < 0.2) + ...
+                   12 .* (t >= 0.2 & t < 0.6) + ...
+                   8  .* (t >= 0.6);
+
 % ---- Initial State Calculation (matching test_DEMPC.m) ----
 Ns_pv   = 5;    Np_pv = 20;
 Voc_mod = 47.6;
@@ -56,7 +61,13 @@ iae_init    = iae_sw(idx_ae);
 
 ib_init  = 0;
 SOC_init = 0.8; % 80% Initial SOC
-x_init   = [vpv0; Impp0; iae_init; 0; Vdc_nom; ib_init; SOC_init];
+
+% Find initial WTG state
+v_w0 = v_w_profile(0);
+vwt0 = 400; % Default initial voltage
+[iLw0, ~] = getWindTurbine(vwt0, v_w0);
+
+x_init   = [vpv0; Impp0; iae_init; 0; Vdc_nom; ib_init; SOC_init; vwt0; iLw0];
 
 % =========================================================================
 % RUN SIMULATIONS
@@ -64,12 +75,12 @@ x_init   = [vpv0; Impp0; iae_init; 0; Vdc_nom; ib_init; SOC_init];
 
 % Run the original DMPC with grid search
 fprintf('--- Starting Original DMPC Simulation ---\n');
-results_dempc = runDEMPC(x_init, t_sim, G_profile, T_profile, Pload_profile);
+results_dempc = runDEMPC(x_init, t_sim, G_profile, T_profile, Pload_profile, v_w_profile);
 fprintf('--- Original DMPC Simulation Complete ---\n\n');
 
 % Run the new DMPC with Grey Wolf Optimizer
 fprintf('--- Starting GWO-DMPC Simulation ---\n');
-results_gwo = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profile);
+results_gwo = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profile, v_w_profile);
 fprintf('--- GWO-DMPC Simulation Complete ---\n\n');
 
 % =========================================================================

@@ -235,7 +235,7 @@ function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profi
 
         % Progress report
         if mod(k, report_every) == 0
-            Perror = aux.Ppv + aux.Ppe + aux.Pbat - Pload - aux.Pae;
+            Perror = aux.Ppv + aux.Pwt + aux.Ppe + aux.Pbat - Pload - aux.Pae;
             fprintf('  %3d%% | t=%.4fs | Vdc=%.1fV | Ppv=%.2fkW | Pwt=%.2fkW | Pbat=%.2fkW | Pae=%.2fkW | Pfc=%.2fkW | Perror=%.0fW | EMS=[%d,%d]\n', ...
                 round(100*k/N_steps), t_now, x(5), aux.Ppv/1000, aux.Pwt/1000, aux.Pbat/1000, aux.Pae/1000, aux.Ppe/1000, Perror, zeta_a, zeta_p);
         end
