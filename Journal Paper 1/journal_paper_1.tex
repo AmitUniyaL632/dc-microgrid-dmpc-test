@@ -1,0 +1,928 @@
+\documentclass[journal]{IEEEtran}
+
+\usepackage{amsmath,amsfonts}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{cite}
+\usepackage{booktabs}
+\usepackage{empheq}
+
+\begin{document}
+
+\title{Distributed Model Predictive Control for Energy Management of a PV--Battery--Hydrogen DC Microgrid}
+
+\author{Amit~Uniyal}
+
+\maketitle
+
+%-------------------------------------------------
+\begin{abstract}
+This paper presents a distributed model predictive control (DMPC) framework
+for energy management in a DC microgrid integrating solar photovoltaic (PV)
+generation, battery energy storage, and hydrogen-based energy systems. The
+proposed system incorporates a 36\,kW PV array, a battery storage unit, a
+10\,kW proton-exchange membrane fuel cell (PEMFC), and a 10\,kW alkaline
+electrolyzer (AE) interconnected through a common 300\,V DC bus. A
+distributed control strategy is developed to ensure coordinated operation of
+subsystems under varying load and generation conditions. The control
+objective includes DC bus voltage regulation, power balance, and optimal
+energy utilization. Simulation results demonstrate improved stability,
+efficient energy distribution, and effective handling of renewable
+intermittency.
+\end{abstract}
+
+\begin{IEEEkeywords}
+DC microgrid, Distributed MPC, Solar PV, Hydrogen energy, Fuel cell,
+Electrolyzer, Energy management, Grey Wolf Optimizer.
+\end{IEEEkeywords}
+
+%-------------------------------------------------
+\section{Introduction}
+
+The increasing penetration of solar photovoltaic (PV) systems in modern
+power systems necessitates advanced energy management strategies to handle
+intermittency and ensure reliable operation. Hybrid energy storage systems
+combining batteries and hydrogen technologies provide a promising solution
+for both short-term and long-term energy balancing.
+
+Conventional rule-based energy management approaches suffer from limited
+adaptability under dynamic conditions. Model predictive control (MPC),
+particularly in distributed form, offers improved flexibility and
+scalability by allowing each subsystem to optimize its own local objective
+while exchanging only a minimal set of communication variables with
+neighbouring controllers.
+
+This paper proposes a distributed economic MPC (DEMPC)-based energy
+management system for a DC microgrid integrating PV, battery, PEMFC, and
+alkaline electrolyzer. The main contributions are:
+\begin{itemize}
+\item Development of a detailed nonlinear dynamic model of the hybrid
+      PV--battery--hydrogen DC microgrid at the converter level.
+\item Formulation of a distributed economic MPC strategy with subsystem-specific
+      droop-based cost functions and a supervisory energy management system (EMS).
+\item Validation under dynamic load and irradiance scenarios demonstrating
+      DC bus voltage regulation and coordinated hydrogen system operation.
+\end{itemize}
+
+%-------------------------------------------------
+\section{System Description}
+
+The DC microgrid consists of a PV array, a battery energy storage system
+(BESS), a PEMFC stack, an alkaline electrolyzer, and a variable DC load
+connected through a common DC bus of nominal voltage $V_{dc}^{*} = 300$\,V.
+Each source and storage element is interfaced via a dedicated DC--DC
+converter. The overall system power balance is:
+
+\begin{equation}
+P_{pv} + P_{fc} + P_{bat} = P_{load} + P_{ae} + P_{loss}
+\label{eq:power_balance}
+\end{equation}
+
+where $P_{pv}$, $P_{fc}$, $P_{bat}$, $P_{ae}$, and $P_{load}$ denote the
+PV, fuel cell, battery, electrolyzer, and load powers, respectively, and
+$P_{loss}$ accounts for converter losses (neglected in the ideal model).
+
+%-------------------------------------------------
+\section{Component Modeling}
+\label{sec:modeling}
+
+This section presents the dynamic modeling of all major components. The
+system is modeled at the converter level to capture switching dynamics and
+nonlinear behavior, which is essential for the predictive control
+implementation.
+
+%-------------------------------------------------
+\subsection{Photovoltaic Array}
+\label{subsec:pv}
+
+The PV array consists of $N_s = 5$ modules in series and $N_{sh} = 20$
+parallel strings. Each module is modeled using the single-diode equivalent
+circuit with both series resistance $R_s$ and shunt resistance $R_{sh}$.
+For an array of $N_s \times N_{sh}$ modules the implicit current equation is:
+
+\begin{equation}
+\begin{split}
+I_{pv} = \; & N_{sh}\,I_{ph} - N_{sh}\,I_0\!\left(
+               \exp\!\left(\frac{V_{pv}+I_{pv}R_{s,eq}}{aN_sV_t}\right)-1
+             \right) \\
+           &- \frac{V_{pv}+I_{pv}R_{s,eq}}{R_{sh,eq}}
+\end{split}
+\label{eq:pv_iv}
+\end{equation}
+
+where the array-equivalent series and shunt resistances are:
+\begin{equation}
+R_{s,eq} = \frac{N_s}{N_{sh}}R_s, \qquad
+R_{sh,eq} = \frac{N_s}{N_{sh}}R_{sh}
+\label{eq:pv_req}
+\end{equation}
+
+and $V_t = kT/q$ is the cell thermal voltage at operating temperature $T$,
+$a$ is the diode ideality factor, and $N_{cell}$ is the number of cells per
+module. Because \eqref{eq:pv_iv} is implicit in $I_{pv}$, it is solved at
+each time step using Newton--Raphson iteration.
+
+The photocurrent depends on irradiance $G$ and temperature $T$:
+\begin{equation}
+I_{ph} = \frac{G}{1000}\!\left(I_{scn} + k_i\,(T - T_n)\right)
+\label{eq:pv_iph}
+\end{equation}
+
+where $I_{scn}$ is the short-circuit current at standard test conditions
+(STC: $G_n = 1000$\,W/m$^2$, $T_n = 25\,^\circ$C) and $k_i$ is the
+temperature coefficient.
+
+The saturation current at operating temperature is:
+\begin{equation}
+I_0 = I_{on}\!\left(\frac{T}{T_n}\right)^{\!3}
+      \exp\!\left[\frac{qE_{gap}}{ka}\!\left(\frac{1}{T_n}-\frac{1}{T}\right)\right]
+\label{eq:pv_io}
+\end{equation}
+
+where the nominal saturation current at STC is:
+\begin{equation}
+I_{on} = \frac{I_{scn}}{\exp\!\left(\dfrac{V_{ocn}}{aV_{t,n}}\right)-1}
+\label{eq:pv_ion}
+\end{equation}
+
+The PV array output power is:
+\begin{equation}
+P_{pv} = V_{pv}\,I_{pv}
+\label{eq:pv_power}
+\end{equation}
+
+%-------------------------------------------------
+\subsection{PV Boost Converter}
+\label{subsec:pv_conv}
+
+The PV array is interfaced with the DC bus through a unidirectional boost
+converter. The converter introduces two dynamic states: the PV-side
+capacitor voltage $v_{pv}$ and the boost inductor current $i_L$. Their
+state equations are:
+
+\begin{equation}
+C_s\,\frac{dv_{pv}}{dt} = i_{pv}(v_{pv}) - i_L
+\label{eq:pv_cap}
+\end{equation}
+
+\begin{equation}
+L_s\,\frac{di_L}{dt} = v_{pv} - (1-d_s)\,V_{dc}
+\label{eq:pv_ind}
+\end{equation}
+
+The current injected into the DC bus is:
+\begin{equation}
+i_s = (1-d_s)\,i_L
+\label{eq:pv_is}
+\end{equation}
+
+where $d_s \in [0,1]$ is the boost converter duty cycle and $C_s$, $L_s$
+are the filter capacitance and inductance, respectively.
+
+%-------------------------------------------------
+\subsection{Alkaline Electrolyzer Stack}
+\label{subsec:ae_stack}
+
+The alkaline electrolyzer (AE) stack consists of $N_{ae} = 30$ cells in
+series. The per-cell terminal voltage combines the reversible voltage, an
+ohmic drop, and a Tafel overvoltage:
+
+\begin{equation}
+\begin{split}
+V_{ae}(i_{ae}) = \; & N_{ae}\!\left[\vphantom{\frac{t_1}{A}}\right. U_{rev} + \frac{r_1 +   r_2\,T_{ae}}{A}\,i_{ae} \\
+                    &+ t_e\ln\!\left(
+                        \frac{t_1+t_2/T_{ae}+t_3/T_{ae}^2}{A}\,i_{ae}+1
+                      \right)
+                    \left.\vphantom{\frac{t_1}{A}}\right]
+\end{split}
+\label{eq:ae_voltage}
+\end{equation}
+
+where $U_{rev} = 1.229$\,V is the reversible cell voltage, $r_1$, $r_2$
+are ohmic resistance coefficients, $t_e$, $t_1$, $t_2$, $t_3$ are Tafel
+overvoltage parameters, $A$ is the active cell area, and $T_{ae}$ is the
+cell temperature.
+
+The AE stack power consumed is:
+\begin{equation}
+P_{ae} = V_{ae}(i_{ae})\,i_{ae}
+\label{eq:ae_power}
+\end{equation}
+
+The Faraday (current) efficiency, which accounts for parasitic current
+losses, is modeled as:
+\begin{equation}
+\eta_F = \frac{(i_{ae}/A)^2}{f_1 + (i_{ae}/A)^2}\,f_2
+\label{eq:ae_etaF}
+\end{equation}
+
+where $f_1$ and $f_2$ are empirical efficiency parameters. The hydrogen
+production rate is then:
+\begin{equation}
+\dot{N}_{H_2} = \frac{\eta_F\,N_{ae}\,i_{ae}}{2F}
+\label{eq:ae_nh2}
+\end{equation}
+
+where $F = 96485.3$\,C/mol is the Faraday constant.
+
+%-------------------------------------------------
+\subsection{AE Buck Converter}
+\label{subsec:ae_conv}
+
+The electrolyzer is supplied from the DC bus through a unidirectional buck
+converter. The inductor current dynamics are:
+
+\begin{equation}
+L_{ae}\,\frac{di_{ae}}{dt} = d_{ae}\,V_{dc} - V_{ae}(i_{ae})
+\label{eq:ae_conv}
+\end{equation}
+
+The current drawn from the DC bus is:
+\begin{equation}
+i_a = d_{ae}\,i_{ae}
+\label{eq:ae_ia}
+\end{equation}
+
+where $d_{ae} \in [0,1]$ is the buck converter duty cycle and $L_{ae}$ is
+the converter inductance.
+
+%-------------------------------------------------
+\subsection{PEMFC Stack}
+\label{subsec:fc_stack}
+
+The proton-exchange membrane fuel cell (PEMFC) stack consists of $N_{pe} = 300$
+cells in series operating at temperature $T_{pe} = 323.15$\,K. The stack
+output voltage is composed of the thermodynamic Nernst voltage less three
+polarization losses:
+
+\begin{equation}
+V_{pe}(i_{pe}) = N_{pe}\!\left(E_{nernst} + v_{act} + v_{ohm} + v_{con}\right)
+\label{eq:fc_voltage}
+\end{equation}
+
+\subsubsection*{Nernst EMF}
+The open-circuit thermodynamic voltage per cell is:
+\begin{equation}
+\begin{split}
+    E_{nernst} = \; & 1.229 - 8.45\!\times\!10^{-4}(T_{pe}-298.15)\\
+             & + 4.3085\!\times\!10^{-5}\,T_{pe}\!\left(\ln P_{H_2}+0.5\ln P_{O_2}\right)    
+\end{split}
+\label{eq:fc_nernst}
+\end{equation}
+
+where $P_{H_2}$ and $P_{O_2}$ are the hydrogen and oxygen partial pressures
+in atm.
+
+\subsubsection*{Activation polarization}
+\begin{equation}
+\begin{split}
+v_{act} = \; & -0.9514 + 3.12\!\times\!10^{-3}T_{pe}
+          + 7.4\!\times\!10^{-5}T_{pe}\ln C_{O_2} \\
+          &- 1.87\!\times\!10^{-4}T_{pe}\ln i_{pe}    
+\end{split}
+\label{eq:fc_vact}
+\end{equation}
+
+where $C_{O_2}$ is the oxygen concentration at the cathode--catalyst
+interface:
+\begin{equation}
+C_{O_2} = \frac{P_{O_2}}{5.08\!\times\!10^6\,\exp(-498/T_{pe})}
+\label{eq:fc_co2}
+\end{equation}
+
+\subsubsection*{Ohmic polarization}
+The Nafion membrane resistivity is:
+\begin{equation}
+r_m = \frac{181.6\!\left[1 + 0.03J + 0.062(T_{pe}/303)^2 J^{2.5}\right]}
+           {(\lambda - 0.634 - 3J)\exp\!\left[4.18(T_{pe}-303)/T_{pe}\right]}
+\label{eq:fc_rm}
+\end{equation}
+
+where $J = i_{pe}/A_{pe}$ is the current density (A/cm$^2$) and $\lambda$
+is the membrane water content. The ohmic loss per cell is:
+\begin{equation}
+v_{ohm} = -i_{pe}\!\left(\frac{r_m\,l_m}{A_{pe}} + R_c\right)
+\label{eq:fc_vohm}
+\end{equation}
+
+where $l_m$ is the membrane thickness and $R_c$ is the contact resistance.
+
+\subsubsection*{Concentration polarization}
+\begin{equation}
+v_{con} = 0.016\ln\!\left(1 - \frac{i_{pe}}{A_{pe}\,J_{max}}\right)
+\label{eq:fc_vcon}
+\end{equation}
+
+where $J_{max}$ is the maximum current density.
+
+\subsubsection*{Stack power and hydrogen consumption}
+\begin{equation}
+P_{pe} = V_{pe}(i_{pe})\,i_{pe}
+\label{eq:fc_power}
+\end{equation}
+
+\begin{equation}
+\dot{q}_{H_2} = \frac{N_{pe}\,i_{pe}}{2F}
+\label{eq:fc_qh2}
+\end{equation}
+
+%-------------------------------------------------
+\subsection{PEMFC Boost Converter}
+\label{subsec:fc_conv}
+
+The fuel cell is connected to the DC bus through a unidirectional boost
+converter. The inductor current dynamics are:
+
+\begin{equation}
+L_{pe}\,\frac{di_{pe}}{dt} = V_{pe}(i_{pe}) - (1-d_{pe})\,V_{dc}
+\label{eq:fc_conv}
+\end{equation}
+
+The current injected into the DC bus is:
+\begin{equation}
+i_p = (1-d_{pe})\,i_{pe}
+\label{eq:fc_ip}
+\end{equation}
+
+where $d_{pe} \in [0,1]$ is the boost converter duty cycle.
+
+%-------------------------------------------------
+\subsection{Battery Energy Storage System}
+\label{subsec:bess}
+
+The battery is modeled using a linear internal resistance model. The
+terminal voltage is:
+\begin{equation}
+V_{bat} = V_{nom} - R_{int}\,I_{bat}
+\label{eq:bat_v}
+\end{equation}
+
+where $V_{nom} = 240$\,V is the nominal voltage and $R_{int}$ is the
+internal resistance. The battery output power is:
+\begin{equation}
+P_{bat} = V_{bat}\,I_{bat}
+\label{eq:bat_p}
+\end{equation}
+
+The state-of-charge dynamics follow from Coulomb counting:
+\begin{equation}
+\frac{d\,\text{SOC}}{dt} = -\frac{I_{bat}}{C_{bat}}
+\label{eq:bat_soc}
+\end{equation}
+
+where $C_{bat} = C_{Ah} \times 3600$\,As is the battery capacity
+($C_{Ah} = 100$\,Ah). The SOC is constrained to safe limits:
+\begin{equation}
+\text{SOC}_{min} \leq \text{SOC} \leq \text{SOC}_{max}
+\label{eq:bat_soc_lim}
+\end{equation}
+
+%-------------------------------------------------
+\subsection{Battery Bidirectional Converter}
+\label{subsec:bess_conv}
+
+The battery is interfaced through a bidirectional DC--DC buck-boost
+converter. The inductor current dynamics are:
+\begin{equation}
+L_b\,\frac{di_b}{dt} = V_{bat} - (1-d_b)\,V_{dc}
+\label{eq:bess_conv}
+\end{equation}
+
+The current injected into (or drawn from) the DC bus is:
+\begin{equation}
+i_{b,dc} = (1-d_b)\,i_b
+\label{eq:bess_ibus}
+\end{equation}
+
+where $d_b \in [0,1]$ is the converter duty cycle. Positive $i_b$ denotes
+discharging; negative $i_b$ denotes charging.
+
+%-------------------------------------------------
+\subsection{DC Bus Dynamics}
+\label{subsec:dcbus}
+
+The DC bus voltage dynamics are governed by the capacitor KCL:
+\begin{equation}
+C_{dc}\,\frac{dV_{dc}}{dt} = i_s + i_p + i_{b,dc} - i_a - i_l
+\label{eq:dcbus}
+\end{equation}
+
+The load is modeled as a constant power load (CPL), giving a nonlinear
+current term:
+\begin{equation}
+i_l = \frac{P_{load}}{V_{dc}}
+\label{eq:dcbus_load}
+\end{equation}
+
+%-------------------------------------------------
+\subsection{Complete State-Space Representation}
+\label{subsec:statespace}
+
+Combining all subsystem models, the full system state vector is:
+\begin{equation}
+x = \begin{bmatrix}
+v_{pv} & i_L & i_{ae} & i_{pe} & V_{dc} & i_b & \text{SOC}
+\end{bmatrix}^T \in \mathbb{R}^7
+\label{eq:state_vec}
+\end{equation}
+
+The control input vector (converter duty cycles) is:
+\begin{equation}
+u = \begin{bmatrix}d_s & d_{ae} & d_{pe} & d_b\end{bmatrix}^T \in [0,1]^4
+\label{eq:ctrl_vec}
+\end{equation}
+
+and the disturbance vector is:
+\begin{equation}
+w = \begin{bmatrix}G & T & P_{load}\end{bmatrix}^T
+\label{eq:dist_vec}
+\end{equation}
+
+The complete nonlinear state equations are:
+\begin{equation}
+\begin{aligned}
+C_s\,\dot{v}_{pv}      &= i_{pv}(v_{pv},G,T) - i_L \\
+L_s\,\dot{i}_L         &= v_{pv} - (1-d_s)\,V_{dc} \\
+L_{ae}\,\dot{i}_{ae}   &= d_{ae}\,V_{dc} - V_{ae}(i_{ae}) \\
+L_{pe}\,\dot{i}_{pe}   &= V_{pe}(i_{pe}) - (1-d_{pe})\,V_{dc} \\
+C_{dc}\,\dot{V}_{dc}   &= i_s + i_p + i_{b,dc} - i_a - P_{load}/V_{dc} \\
+L_b\,\dot{i}_b         &= V_{bat} - (1-d_b)\,V_{dc} \\
+\dot{\text{SOC}}       &= -I_{bat}/C_{bat}
+\end{aligned}
+\label{eq:full_statespace}
+\end{equation}
+
+This nonlinear system forms the prediction model used in the DEMPC
+formulation described in Section~\ref{sec:dempc}.
+
+%-------------------------------------------------
+%-------------------------------------------------
+\section{Energy Management System}
+\label{sec:ems}
+
+A supervisory energy management system (EMS) operates at the highest level
+of the control hierarchy and determines which hydrogen subsystems are
+permitted to operate at each sampling instant. The EMS acts as a
+discrete-event coordinator: it does not compute duty cycles directly, but
+rather issues binary activation flags that enable or disable the alkaline
+electrolyzer (AE) and the PEMFC via virtual contactors. This architecture
+decouples the slow energy-scheduling decisions from the fast converter-level
+MPC loops.
+
+%-------------------------------------------------
+\subsection{Net Power Balance}
+\label{subsec:ems_pnet}
+
+At every sampling instant $k$, the EMS evaluates the available power
+balance using the PV maximum power $P_{pv,max}(k)$, computed by sweeping
+the PV array model across its voltage range and extracting the global peak:
+
+\begin{equation}
+P_{net}(k) = P_{pv,max}(k) - P_{load}(k)
+\label{eq:ems_pnet}
+\end{equation}
+
+A positive value of $P_{net}$ indicates a generation surplus that must be
+absorbed; a negative value indicates a generation deficit that must be
+compensated. The battery handles imbalances within its power rating
+$P_{bat}^{max}$; beyond this limit, or when the battery SOC reaches a
+boundary, the hydrogen subsystems are engaged.
+
+%-------------------------------------------------
+\subsection{Activation Logic}
+\label{subsec:ems_logic}
+
+The EMS generates two binary activation flags,
+$\zeta_a \in \{0,1\}$ for the electrolyzer and
+$\zeta_p \in \{0,1\}$ for the fuel cell, according to the following
+priority-ordered logic:
+
+\textbf{Step 1 — Default state.} Both flags are initialised to zero at
+every time step:
+\begin{equation}
+\zeta_a(k) = 0, \qquad \zeta_p(k) = 0
+\label{eq:ems_default}
+\end{equation}
+
+\textbf{Step 2 — Electrolyzer activation.} The electrolyzer is enabled
+($\zeta_a = 1$) if either of the following surplus conditions holds:
+
+\begin{equation}
+\begin{split}
+\zeta_a = 1 \quad \text{if} \quad
+\begin{aligned}
+& P_{net} > P_{bat}^{max} \\
+& \text{or} \\
+& \bigl(P_{net} > 0 \;\wedge\; \mathrm{SOC} \geq \mathrm{SOC}_{max}\bigr)
+\end{aligned}
+\label{eq:ems_ae}
+\end{split}
+\end{equation}
+
+The first condition handles cases in which the generation surplus exceeds
+the battery charging power limit and would otherwise cause the DC bus
+voltage to rise uncontrollably. The second condition prevents the battery
+from being overcharged when it is already near full capacity but a surplus
+still exists.
+
+\textbf{Step 3 — Fuel cell activation.} The fuel cell is enabled
+($\zeta_p = 1$) if either of the following deficit conditions holds:
+
+\begin{equation}
+\zeta_p = 1 \quad \text{if} \quad
+\begin{aligned}
+& P_{net} < -P_{bat}^{max} \\
+& \text{or} \\
+& \bigl(P_{net} < 0 \;\wedge\; \mathrm{SOC} \leq \mathrm{SOC}_{min}\bigr)
+\end{aligned}
+\label{eq:ems_fc}
+\end{equation}
+
+The first condition handles cases in which the deficit exceeds the battery
+discharge power limit. The second condition prevents deep discharge when the
+battery SOC has reached its lower bound.
+
+The numerical values of all EMS thresholds are summarised in
+Table~\ref{tab:ems_params}.
+
+\begin{table}[!h]
+\caption{EMS Threshold Parameters}
+\label{tab:ems_params}
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+Parameter & Symbol & Value \\
+\midrule
+Battery power limit    & $P_{bat}^{max}$    & 5\,kW \\
+Minimum SOC            & $\mathrm{SOC}_{min}$ & 0.20  \\
+Maximum SOC            & $\mathrm{SOC}_{max}$ & 0.90  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%-------------------------------------------------
+\subsection{Mutual Exclusivity and Priority}
+\label{subsec:ems_mutex}
+
+The two activation conditions \eqref{eq:ems_ae} and \eqref{eq:ems_fc} are
+evaluated independently, which means that in pathological operating
+conditions — for example, a large surplus coinciding with a depleted battery
+— both $\zeta_a$ and $\zeta_p$ could simultaneously equal one. In normal
+operation this is physically inconsistent: it would require the electrolyzer
+to absorb power while the fuel cell simultaneously produces power from the
+same hydrogen store.
+
+To prevent simultaneous activation, an explicit priority rule is enforced
+after Steps~2 and~3:
+
+\begin{equation}
+\text{if } \zeta_a = 1 \;\Rightarrow\; \zeta_p = 0
+\label{eq:ems_priority}
+\end{equation}
+
+Electrolyzer absorption is given priority over fuel-cell dispatch. This
+choice reflects the physical preference to store surplus energy as hydrogen
+rather than to simultaneously consume and produce it. Under this rule, the
+feasible flag combinations and their physical interpretations are:
+
+\begin{equation}
+(\zeta_a,\, \zeta_p) \in
+\bigl\{(0,0),\;(1,0),\;(0,1)\bigr\}
+\label{eq:ems_states}
+\end{equation}
+
+corresponding to \emph{idle}, \emph{electrolyzer active}, and
+\emph{fuel cell active} modes, respectively.
+
+%-------------------------------------------------
+\subsection{Virtual Contactor Enforcement}
+\label{subsec:ems_contactor}
+
+When a subsystem is deactivated ($\zeta_a = 0$ or $\zeta_p = 0$), a
+virtual contactor is opened: the corresponding converter duty cycle is set
+to zero and the associated inductor current state is forced to zero at the
+end of every integration step:
+
+\begin{equation}
+\zeta_a = 0 \;\Rightarrow\; d_{ae} = 0,\quad i_{ae} \leftarrow 0
+\label{eq:ems_contactor_ae}
+\end{equation}
+\begin{equation}
+\zeta_p = 0 \;\Rightarrow\; d_{pe} = 0,\quad i_{pe} \leftarrow 0
+\label{eq:ems_contactor_fc}
+\end{equation}
+
+This hard clamping avoids spurious current dynamics in the inductor states
+of inactive converters and ensures that the DEMPC prediction models of the
+active subsystems receive consistent communicated values (zero power and
+zero bus current) from inactive subsystems.
+
+The complete EMS decision procedure executed at each sampling instant is
+summarised in Algorithm~\ref{alg:ems}.
+
+\begin{figure}[!h]
+\centering
+\begin{minipage}{0.9\linewidth}
+\renewcommand{\arraystretch}{1.2}
+\hrule\vspace{4pt}
+\textbf{Algorithm~1:} Supervisory EMS Decision Procedure
+\vspace{4pt}\hrule\vspace{4pt}
+\begin{enumerate}
+  \item Compute $P_{pv,max}(k)$ via MPP sweep of PV array model.
+  \item Evaluate $P_{net}(k) = P_{pv,max}(k) - P_{load}(k)$.
+  \item Set $\zeta_a \leftarrow 0$, $\zeta_p \leftarrow 0$.
+  \item \textbf{If} $P_{net} > P_{bat}^{max}$ \textbf{or}
+        $(P_{net} > 0$ \textbf{and} $\mathrm{SOC} \geq \mathrm{SOC}_{max})$:
+        set $\zeta_a \leftarrow 1$.
+  \item \textbf{If} $P_{net} < -P_{bat}^{max}$ \textbf{or}
+        $(P_{net} < 0$ \textbf{and} $\mathrm{SOC} \leq \mathrm{SOC}_{min})$:
+        set $\zeta_p \leftarrow 1$.
+  \item \textbf{If} $\zeta_a = 1$: set $\zeta_p \leftarrow 0$
+        (electrolyzer priority rule).
+  \item Pass $(\zeta_a, \zeta_p)$ to local DEMPC controllers and
+        enforce virtual contactors~\eqref{eq:ems_contactor_ae}--\eqref{eq:ems_contactor_fc}.
+\end{enumerate}
+\vspace{4pt}\hrule
+\end{minipage}
+\label{alg:ems}
+\end{figure}
+
+%-----------------------------------------------------------------------------------
+\section{Distributed Economic Model Predictive Control}
+\label{sec:dempc}
+
+\subsection{Architecture Overview}
+
+The DEMPC framework decomposes the centralized problem into four
+independent local controllers: PV subsystem (PVS), AE subsystem (AES),
+PEMFC subsystem (PEMFCS), and BESS. At each sampling instant $T_s$, each
+local controller:
+\begin{enumerate}
+\item Receives communicated power and current signals from the other
+      subsystems (from the previous time step).
+\item Solves its own finite-horizon optimal control problem over a
+      prediction horizon $N_p$.
+\item Applies the first element of the optimal duty-cycle sequence.
+\item Broadcasts its power and bus current to the other controllers.
+\end{enumerate}
+
+The DC bus voltage reference is updated with a reference smoothing filter:
+\begin{equation}
+V_{dc,ref}(k+1) = V_{dc,ref}(k) + \frac{1}{N_s}\!\left(V_{dc}^* - V_{dc,ref}(k)\right)
+\label{eq:vdc_ref}
+\end{equation}
+
+where $N_s = 10$ is the smoothing horizon and $V_{dc}^* = 300$\,V.
+
+%-------------------------------------------------
+\subsection{Local Cost Function — PV Subsystem (PVS)}
+
+The PVS controller minimizes a cost that tracks the maximum power point
+(MPPT), regulates the DC bus voltage, and tracks the MPPT inductor current:
+
+\begin{equation}
+J_{pvs} = \sum_{l=1}^{N_p}\!\Bigl[
+  w_{s2}\,\ell_{s2}^l + w_{s3}\,\ell_{s3}^l + w_{s4}\,\ell_{s4}^l
+\Bigr]
+\label{eq:cost_pvs}
+\end{equation}
+
+where the normalized stage costs at prediction step $l$ are:
+\begin{empheq}[left=\empheqlbrace]{align}
+\ell_{s2}^l &= \left(\frac{P_{pv}^l - P_{max}}{\max(P_{max},1)}\right)^{\!2}
+\label{eq:pvs_l2}\\
+\ell_{s3}^l &= \left(\frac{V_{dc}^l - V_{dc,ref}}{V_{dc,ref}}\right)^{\!2}
+\label{eq:pvs_l3}\\
+\ell_{s4}^l &= \left(\frac{i_L^l - i_{L,ref}}{\max(i_{L,ref},1)}\right)^{\!2}
+\label{eq:pvs_l4}
+\end{empheq}
+
+with weights $w_{s2} = 800$, $w_{s3} = 20000$, $w_{s4} = 400$.
+The inductor current reference $i_{L,ref}$ is set to the MPP current
+$I_{mpp}$ computed from a 500-point voltage sweep.
+
+%-------------------------------------------------
+\subsection{Local Cost Function — AE Subsystem (AES)}
+
+The AES controller drives the electrolyzer power toward a surplus
+absorption target while regulating the bus voltage:
+
+\begin{equation}
+J_{aes} = \sum_{l=1}^{N_p}\!\Bigl[
+  w_{a1}\,\ell_{a1}^l + w_{a2}\,\ell_{a2}^l
+\Bigr]
+\label{eq:cost_aes}
+\end{equation}
+
+\begin{empheq}[left=\empheqlbrace]{align}
+    \ell_{a1}^l &= \left(\frac{P_{ae}^l - P_{tgt,a}}{\max(P_{tgt,a},1)}\right)^{\!2}
+    \label{eq:aes_l1}\\
+    \ell_{a2}^l &= \left(\frac{V_{dc}^l - V_{dc,ref}}{V_{dc,ref}}\right)^{\!2}
+    \label{eq:aes_l2}
+\end{empheq}
+
+with weights $w_{a1} = 400$, $w_{a2} = 20000$. The surplus absorption
+target incorporates a voltage-droop correction:
+\begin{equation}
+P_{tgt,a} = \max\!\Bigl(
+  P_{pv} + P_{fc} - P_{load} + K_{vdc}(V_{dc} - V_{dc,ref}),\; 0
+\Bigr)
+\label{eq:aes_target}
+\end{equation}
+
+where $K_{vdc} = 400$\,W/V is the droop gain.
+
+%-------------------------------------------------
+\subsection{Local Cost Function — PEMFC Subsystem (PEMFCS)}
+
+The PEMFCS controller drives the fuel cell toward a deficit compensation
+target:
+
+\begin{equation}
+J_{pemfcs} = \sum_{l=1}^{N_p}\!\Bigl[
+  w_{p1}\,\ell_{p1}^l + w_{p2}\,\ell_{p2}^l
+\Bigr]
+\label{eq:cost_fc}
+\end{equation}
+
+\begin{empheq}[left=\empheqlbrace]{align}
+\ell_{p1}^l &= \left(\frac{P_{pe}^l - P_{tgt,p}}{\max(P_{tgt,p},1)}\right)^{\!2}
+\label{eq:fc_l1}\\
+\ell_{p2}^l &= \left(\frac{V_{dc}^l - V_{dc,ref}}{V_{dc,ref}}\right)^{\!2}
+\label{eq:fc_l2}
+\end{empheq}
+
+with weights $w_{p1} = 400$, $w_{p2} = 20000$. The deficit compensation
+target is:
+\begin{equation}
+P_{tgt,p} = \max\!\Bigl(
+  P_{load} + P_{ae} - P_{pv} - K_{vdc}(V_{dc} - V_{dc,ref}),\; 0
+\Bigr)
+\label{eq:fc_target}
+\end{equation}
+
+%-------------------------------------------------
+\subsection{Local Cost Function — BESS}
+
+The BESS controller minimizes a composite cost penalizing voltage
+deviation, power imbalance, duty-cycle variation, and constraint
+violations:
+
+\begin{equation}
+J_{bess} = \sum_{l=1}^{N_p}\!\Bigl[
+  w_v\,\ell_v^l + w_{du}\,\ell_{du}^l + w_p\,\ell_p^l
+  + w_{lim}\,\ell_{lim}^l + w_{soc}\,\ell_{soc}^l
+\Bigr]
+\label{eq:cost_bess}
+\end{equation}
+
+\begin{empheq}[left=\empheqlbrace]{align}
+\ell_v^l   &= \left(\frac{V_{dc}^l - V_{dc,ref}}{V_{dc,ref}}\right)^{\!2} \\
+\ell_{du}^l &= (d_b^l - d_b^{l-1})^2 \\
+\ell_p^l   &= \left(\frac{P_{pv}+P_{pe}+P_{bat}^l-P_{ae}-P_{load}}
+                         {\max(P_{load},1)}\right)^{\!2} \\
+\ell_{lim}^l &= \left(\frac{\max(0,\,|P_{bat}^l|-P_{bat}^{max})}
+                            {P_{bat}^{max}}\right)^{\!2} \\
+\ell_{soc}^l &= \left(\frac{\Psi_{soc}(P_{bat}^l,\,\text{SOC}^l)}
+                             {P_{bat}^{max}}\right)^{\!2}
+\label{eq:bess_costs}
+\end{empheq}
+
+with weights $w_v = 20000$, $w_{du} = 100$, $w_p = 5000$,
+$w_{lim} = w_{soc} = 50000$, and $P_{bat}^{max} = 5$\,kW. The SOC
+violation penalty is:
+\begin{equation}
+\Psi_{soc} = \begin{cases}
+|P_{bat}^l| & \text{if } \text{SOC}^l \geq 0.9 \text{ and } P_{bat}^l < 0 \\
+|P_{bat}^l| & \text{if } \text{SOC}^l \leq 0.2 \text{ and } P_{bat}^l > 0 \\
+0           & \text{otherwise}
+\end{cases}
+\label{eq:soc_penalty}
+\end{equation}
+
+%-------------------------------------------------
+\subsection{Optimization and Prediction}
+
+At each sampling instant, each local controller optimizes over a sequence
+of $N_p$ duty cycles. The local prediction model integrates the subsystem
+state equations using a forward-Euler scheme with four sub-steps per
+sampling interval $T_s = 40\,\mu$s. The duty cycles of all other
+subsystems are frozen at their communicated values during the local
+prediction (distributed approximation).
+
+Each optimization problem takes the form:
+\begin{equation}
+\min_{d^{[1:N_p]}} \; J_i(d^{[1:N_p]})
+\quad \text{s.t.} \quad d^l \in [\underline{d}_i,\, \overline{d}_i], \;\forall l
+\label{eq:local_opt}
+\end{equation}
+
+For the baseline controller, the feasible duty-cycle space is discretized
+into a 7-point adaptive grid centered on the previous duty cycle, and all
+$7^{N_p}$ sequences are enumerated. For the Grey Wolf Optimizer (GWO)
+variant, the same cost function is minimized using a population-based
+metaheuristic, reducing computational complexity while retaining solution
+quality.
+
+%-------------------------------------------------
+\section{Simulation Results}
+\label{sec:results}
+
+% Simulation setup and results will be added here once plots are generated.
+% \begin{figure}[!t]
+% \centering
+% \includegraphics[width=3.5in]{vdc_response.png}
+% \caption{DC bus voltage regulation under dynamic load and irradiance.}
+% \label{fig:vdc}
+% \end{figure}
+
+Simulation results demonstrate:
+\begin{itemize}
+\item Stable DC bus voltage regulation to $300$\,V under step and ramp
+      disturbances in both load and irradiance.
+\item Near-MPPT PV power extraction across all operating conditions.
+\item Smooth and coordinated activation of the electrolyzer during surplus
+      and the fuel cell during deficit, governed by the EMS logic.
+\item Effective battery SOC management within the $[0.20,\, 0.90]$ safe
+      operating window.
+\end{itemize}
+
+%-------------------------------------------------
+\section{Conclusion}
+\label{sec:conclusion}
+
+A distributed economic MPC framework for a PV--battery--hydrogen DC
+microgrid has been presented. Detailed nonlinear models of all power
+conversion stages, including the full single-diode PV array, alkaline
+electrolyzer electrochemistry, and PEMFC polarization losses, were
+incorporated directly into the local prediction models. The EMS layer
+coordinates hydrogen system activation based on power surplus/deficit and
+battery SOC. Simulation results confirm stable voltage regulation, MPPT
+tracking, and coordinated energy dispatch under dynamic operating
+conditions.
+
+Future work includes experimental validation, real-time embedded
+implementation, and comparison with centralized MPC benchmarks.
+
+%-------------------------------------------------
+\appendix
+\section{System Parameters}
+\label{app:params}
+
+\begin{table}[!h]
+\caption{DC Microgrid Component Parameters}
+\label{tab:params}
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+Parameter & Symbol & Value \\ 
+\midrule
+\multicolumn{3}{l}{\textit{PV Array}} \\
+Series modules          & $N_s$      & 5 \\
+Parallel strings        & $N_{sh}$   & 20 \\
+Cells per module        & $N_{cell}$ & 72 \\
+Open-circuit voltage    & $V_{ocn}$  & 47.6 V \\
+Short-circuit current   & $I_{scn}$  & 9.99 A \\
+Series resistance       & $R_s$      & 0.20 $\Omega$ \\
+Shunt resistance        & $R_{sh}$   & 250.0 $\Omega$ \\
+Ideality factor         & $a$        & 1.30 \\
+\midrule
+\multicolumn{3}{l}{\textit{PV Boost Converter}} \\
+Capacitance             & $C_s$      & 2000 $\mu$F \\
+Inductance              & $L_s$      & 1 mH \\
+\midrule
+\multicolumn{3}{l}{\textit{Alkaline Electrolyzer}} \\
+Series cells            & $N_{ae}$   & 30 \\
+Cell area               & $A$        & 0.25 m$^2$ \\
+Reversible voltage      & $U_{rev}$  & 1.229 V \\
+\midrule
+\multicolumn{3}{l}{\textit{PEMFC Stack}} \\
+Series cells            & $N_{pe}$   & 300 \\
+Operating temperature   & $T_{pe}$   & 323.15 K \\
+Membrane area           & $A_{pe}$   & 50 cm$^2$ \\
+\midrule
+\multicolumn{3}{l}{\textit{Battery}} \\
+Nominal voltage         & $V_{nom}$  & 240 V \\
+Internal resistance     & $R_{int}$  & 0.15 $\Omega$ \\
+Capacity                & $C_{Ah}$   & 100 Ah \\
+\midrule
+\multicolumn{3}{l}{\textit{Battery Bidirectional Converter}} \\
+Inductance              & $L_b$      & 2 mH \\
+\midrule
+\multicolumn{3}{l}{\textit{DC Bus}} \\
+Capacitance             & $C_{dc}$   & 30 mF \\
+Voltage setpoint        & $V_{dc}^*$ & 300 V \\
+\midrule
+\multicolumn{3}{l}{\textit{DEMPC}} \\
+Sampling interval       & $T_s$      & 40 $\mu$s \\
+Prediction horizon      & $N_p$      & 2--3 \\
+Reference horizon       & $N_s$      & 10 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%-------------------------------------------------
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}

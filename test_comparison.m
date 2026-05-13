@@ -1,3 +1,4 @@
+%% 
 % =========================================================================
 % test_comparison.m
 %
@@ -11,7 +12,7 @@
 % 4. Plot the results of both simulations on the same axes for comparison.
 % =========================================================================
 
-clear; clc; close all;
+%clear; clc; close all;
 
 % ---- Simulation Scenario ----
 t_sim = 0.8; % Extended to 800ms for full 4-stage profile
@@ -75,93 +76,93 @@ fprintf('--- GWO-DMPC Simulation Complete ---\n\n');
 % PLOT COMPARISON RESULTS
 % =========================================================================
 
-fprintf('Plotting comparison results...\n');
+% fprintf('Plotting comparison results...\n');
 
-% Figure 1: DC Bus Voltage
-figure('Name', 'DC Bus Voltage Comparison');
-plot(results_dempc.t, results_dempc.X(:,5), 'b-', 'LineWidth', 1.5);
-hold on;
-plot(results_gwo.t, results_gwo.X(:,5), 'r--', 'LineWidth', 1.5);
-plot(results_dempc.t, results_dempc.Vdc_ref, 'k:', 'LineWidth', 1);
-grid on;
-title('DC Bus Voltage (V_{dc})');
-xlabel('Time (s)');
-ylabel('Voltage (V)');
-legend('DMPC (Grid Search)', 'DMPC (GWO)', 'V_{dc} Reference');
-ylim([270 330]);
+% % Figure 1: DC Bus Voltage
+% figure('Name', 'DC Bus Voltage Comparison');
+% plot(results_dempc.t, results_dempc.X(:,5), 'b-', 'LineWidth', 1.5);
+% hold on;
+% plot(results_gwo.t, results_gwo.X(:,5), 'r--', 'LineWidth', 1.5);
+% plot(results_dempc.t, results_dempc.Vdc_ref, 'k:', 'LineWidth', 1);
+% grid on;
+% title('DC Bus Voltage (V_{dc})');
+% xlabel('Time (s)');
+% ylabel('Voltage (V)');
+% legend('DMPC (Grid Search)', 'DMPC (GWO)', 'V_{dc} Reference');
+% ylim([270 330]);
 
-% Figure 2: Power Profiles
-figure('Name', 'Power Profile Comparison');
+% % Figure 2: Power Profiles
+% figure('Name', 'Power Profile Comparison');
 
-subplot(4,1,1);
-plot(results_dempc.t, results_dempc.Ppv/1000, 'b-', results_gwo.t, results_gwo.Ppv/1000, 'r--');
-hold on; plot(results_dempc.t, results_dempc.Pmax/1000, 'g:');
-grid on; title('PV Power (P_{pv})'); ylabel('Power (kW)');
-legend('DMPC', 'GWO', 'P_{max}');
+% subplot(4,1,1);
+% plot(results_dempc.t, results_dempc.Ppv/1000, 'b-', results_gwo.t, results_gwo.Ppv/1000, 'r--');
+% hold on; plot(results_dempc.t, results_dempc.Pmax/1000, 'g:');
+% grid on; title('PV Power (P_{pv})'); ylabel('Power (kW)');
+% legend('DMPC', 'GWO', 'P_{max}');
 
-subplot(4,1,2);
-plot(results_dempc.t, results_dempc.Pae/1000, 'b-', results_gwo.t, results_gwo.Pae/1000, 'r--');
-grid on; title('Electrolyzer Power (P_{ae})'); ylabel('Power (kW)');
-legend('DMPC', 'GWO');
+% subplot(4,1,2);
+% plot(results_dempc.t, results_dempc.Pae/1000, 'b-', results_gwo.t, results_gwo.Pae/1000, 'r--');
+% grid on; title('Electrolyzer Power (P_{ae})'); ylabel('Power (kW)');
+% legend('DMPC', 'GWO');
 
-subplot(4,1,3);
-plot(results_dempc.t, results_dempc.Ppe/1000, 'b-', results_gwo.t, results_gwo.Ppe/1000, 'r--');
-grid on; title('Fuel Cell Power (P_{pe})'); ylabel('Power (kW)');
-legend('DMPC', 'GWO');
+% subplot(4,1,3);
+% plot(results_dempc.t, results_dempc.Ppe/1000, 'b-', results_gwo.t, results_gwo.Ppe/1000, 'r--');
+% grid on; title('Fuel Cell Power (P_{pe})'); ylabel('Power (kW)');
+% legend('DMPC', 'GWO');
 
-subplot(4,1,4);
-plot(results_dempc.t, results_dempc.Pbat/1000, 'b-', results_gwo.t, results_gwo.Pbat/1000, 'r--');
-grid on; title('Battery Power (P_{bat})'); ylabel('Power (kW)');
-xlabel('Time (s)');
-legend('DMPC', 'GWO');
+% subplot(4,1,4);
+% plot(results_dempc.t, results_dempc.Pbat/1000, 'b-', results_gwo.t, results_gwo.Pbat/1000, 'r--');
+% grid on; title('Battery Power (P_{bat})'); ylabel('Power (kW)');
+% xlabel('Time (s)');
+% legend('DMPC', 'GWO');
 
-% Figure 3: Duty Cycles
-figure('Name', 'Duty Cycle Comparison');
+% % Figure 3: Duty Cycles
+% figure('Name', 'Duty Cycle Comparison');
 
-subplot(4,1,1);
-plot(results_dempc.t, results_dempc.U(:,1), 'b-', results_gwo.t, results_gwo.U(:,1), 'r--');
-grid on; title('PV Duty Cycle (S_s)'); ylabel('Duty Cycle');
-legend('DMPC', 'GWO');
+% subplot(4,1,1);
+% plot(results_dempc.t, results_dempc.U(:,1), 'b-', results_gwo.t, results_gwo.U(:,1), 'r--');
+% grid on; title('PV Duty Cycle (S_s)'); ylabel('Duty Cycle');
+% legend('DMPC', 'GWO');
 
-subplot(4,1,2);
-plot(results_dempc.t, results_dempc.U(:,2), 'b-', results_gwo.t, results_gwo.U(:,2), 'r--');
-grid on; title('AE Duty Cycle (S_{ae})'); ylabel('Duty Cycle');
-legend('DMPC', 'GWO');
+% subplot(4,1,2);
+% plot(results_dempc.t, results_dempc.U(:,2), 'b-', results_gwo.t, results_gwo.U(:,2), 'r--');
+% grid on; title('AE Duty Cycle (S_{ae})'); ylabel('Duty Cycle');
+% legend('DMPC', 'GWO');
 
-subplot(4,1,3);
-plot(results_dempc.t, results_dempc.U(:,3), 'b-', results_gwo.t, results_gwo.U(:,3), 'r--');
-grid on; title('FC Duty Cycle (S_{pe})'); ylabel('Duty Cycle');
-legend('DMPC', 'GWO');
+% subplot(4,1,3);
+% plot(results_dempc.t, results_dempc.U(:,3), 'b-', results_gwo.t, results_gwo.U(:,3), 'r--');
+% grid on; title('FC Duty Cycle (S_{pe})'); ylabel('Duty Cycle');
+% legend('DMPC', 'GWO');
 
-subplot(4,1,4);
-plot(results_dempc.t, results_dempc.U(:,4), 'b-', results_gwo.t, results_gwo.U(:,4), 'r--');
-grid on; title('Battery Duty Cycle (S_b)'); ylabel('Duty Cycle');
-xlabel('Time (s)');
-legend('DMPC', 'GWO');
+% subplot(4,1,4);
+% plot(results_dempc.t, results_dempc.U(:,4), 'b-', results_gwo.t, results_gwo.U(:,4), 'r--');
+% grid on; title('Battery Duty Cycle (S_b)'); ylabel('Duty Cycle');
+% xlabel('Time (s)');
+% legend('DMPC', 'GWO');
 
-% Figure 4: Hydrogen Tank Pressure
-figure('Name', 'Hydrogen Tank Pressure Comparison');
-plot(results_dempc.t, results_dempc.Ptank / 1e5, 'b-', 'LineWidth', 1.5);
-hold on;
-plot(results_gwo.t, results_gwo.Ptank / 1e5, 'r--', 'LineWidth', 1.5);
-grid on;
-title('Hydrogen Tank Pressure');
-xlabel('Time (s)');
-ylabel('Pressure (bar)');
-legend('DMPC (Grid Search)', 'DMPC (GWO)');
-xlim([0 t_sim]);
+% % Figure 4: Hydrogen Tank Pressure
+% figure('Name', 'Hydrogen Tank Pressure Comparison');
+% plot(results_dempc.t, results_dempc.Ptank / 1e5, 'b-', 'LineWidth', 1.5);
+% hold on;
+% plot(results_gwo.t, results_gwo.Ptank / 1e5, 'r--', 'LineWidth', 1.5);
+% grid on;
+% title('Hydrogen Tank Pressure');
+% xlabel('Time (s)');
+% ylabel('Pressure (bar)');
+% legend('DMPC (Grid Search)', 'DMPC (GWO)');
+% xlim([0 t_sim]);
 
-% Figure 5: Battery SOC Comparison
-figure('Name', 'Battery SOC Comparison');
-plot(results_dempc.t, results_dempc.SOC * 100, 'b-', 'LineWidth', 1.5);
-hold on;
-plot(results_gwo.t, results_gwo.SOC * 100, 'r--', 'LineWidth', 1.5);
-grid on;
-title('Battery State of Charge');
-xlabel('Time (s)');
-ylabel('SOC (%)');
-legend('DMPC (Grid Search)', 'DMPC (GWO)');
-xlim([0 t_sim]);
+% % Figure 5: Battery SOC Comparison
+% figure('Name', 'Battery SOC Comparison');
+% plot(results_dempc.t, results_dempc.SOC * 100, 'b-', 'LineWidth', 1.5);
+% hold on;
+% plot(results_gwo.t, results_gwo.SOC * 100, 'r--', 'LineWidth', 1.5);
+% grid on;
+% title('Battery State of Charge');
+% xlabel('Time (s)');
+% ylabel('SOC (%)');
+% legend('DMPC (Grid Search)', 'DMPC (GWO)');
+% xlim([0 t_sim]);
 
 % Calculate and display performance metrics
 Vdc_IAE_dempc = sum(abs(results_dempc.X(:,5) - results_dempc.Vdc_ref)) * results_dempc.Ts;

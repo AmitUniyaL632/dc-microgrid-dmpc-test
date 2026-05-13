@@ -1,0 +1,3724 @@
+
+================================================================================
+FILE: getAE.m
+================================================================================
+% =========================================================================
+% getAE.m
+% Alkaline Electrolyzer (AE) Stack Model
+% Implements Equations 15-17 from:
+% "PV/Hydrogen DC microgrid control using distributed economic MPC"
+% Renewable Energy 222 (2024) 119871
+%
+% Inputs:
+%   iae   : AE stack current (A) - scalar or vector
+%
+% Outputs:
+%   vae   : AE stack voltage (V)
+%   Pae   : AE stack power consumed (W)
+%   NH2   : Hydrogen production rate (mol/s)
+%   etaF  : Faraday (current) efficiency [-]
+% =========================================================================
+
+function [vae, Pae, NH2, etaF] = getAE(iae)
+
+    % =====================================================================
+    % AE STACK PARAMETERS  (Table 4 of reference paper)
+    % =====================================================================
+    Nae     = 30;           % Number of electrolyzer cells in series      [-]
+    Tae     = 25;           % Electrolyzer cell temperature                [deg C]
+    urev    = 1.229;        % Reversible cell voltage at 25C, 1atm        [V]
+    r1      = 7.33e-5;      % Ohmic resistance coefficient 1              [Ohm*m^2]
+    r2      = -1.11e-7;     % Ohmic resistance coefficient 2              [Ohm*m^2/degC]
+    te      = 0.185;        % Overvoltage coefficient                      [V]
+    t1      = 1.6e-2;       % Overvoltage parameter 1                     [m^2/A]
+    t2      = -1.302;       % Overvoltage parameter 2                     [m^2*degC/A]
+    t3      = 4.21e2;       % Overvoltage parameter 3                     [m^2*degC^2/A]
+    A       = 0.25;         % Electrolyzer cell active area               [m^2]
+    F       = 96485.3;      % Faraday constant                            [C/mol]
+    f1      = 2.5e4;        % Current efficiency parameter 1              [A^2/m^4]
+    f2      = 0.96;         % Current efficiency parameter 2              [-]
+
+    % Guard against zero or negative current
+    iae     = max(iae, 1e-6);
+
+    % =====================================================================
+    % STEP 1: Per-cell ohmic resistance term              [Part of Eq. 15]
+    % R_ohm = (r1 + r2*Tae) / A
+    % Units: [Ohm*m^2] / [m^2] = [Ohm]
+    % =====================================================================
+    R_ohm   = (r1 + r2 * Tae) / A;
+
+    % =====================================================================
+    % STEP 2: Per-cell overvoltage (Tafel) term          [Part of Eq. 15]
+    % arg = (t1 + t2/Tae + t3/Tae^2) / A * iae + 1
+    % V_over = te * ln(arg)
+    % =====================================================================
+    t_param = t1 + t2/Tae + t3/Tae^2;     % Combined temp-dependent term [m^2/A]
+    arg     = (t_param / A) .* iae + 1;    % Argument of logarithm        [-]
+    V_over  = te .* log(arg);              % Overvoltage per cell         [V]
+
+    % =====================================================================
+    % STEP 3: AE stack voltage                                    [Eq. 15]
+    % vae = Nae * { urev + R_ohm*iae + V_over }
+    % =====================================================================
+    vae     = Nae .* (urev + R_ohm .* iae + V_over);
+
+    % =====================================================================
+    % STEP 4: AE stack power consumed                             [Eq. 16]
+    % Pae = vae * iae
+    % =====================================================================
+    Pae     = vae .* iae;
+
+    % =====================================================================
+    % STEP 5: Faraday (current) efficiency                   [Below Eq. 17]
+    % etaF = [(iae/A)^2 / (f1 + (iae/A)^2)] * f2
+    % J = iae/A  [A/m^2]
+    % =====================================================================
+    J       = iae / A;                     % Current density              [A/m^2]
+    etaF    = (J.^2 ./ (f1 + J.^2)) * f2; % Current efficiency           [-]
+
+    % =====================================================================
+    % STEP 6: Hydrogen production rate                            [Eq. 17]
+    % NH2 = etaF * Nae * iae / (2*F)       [mol/s]
+    % =====================================================================
+    NH2     = etaF .* Nae .* iae ./ (2 * F);
+
+end
+================================================================================
+FILE: getAEBuckConverter.m
+================================================================================
+% =========================================================================
+% getAEBuckConverter.m
+% Alkaline Electrolyzer Unidirectional Buck Converter State Equations
+% Implements Equation 13 from Zhu et al., Renewable Energy 222 (2024) 119871
+%
+% Inputs:
+%   iae   : AE inductor/AE current            (A)   [state x3]
+%   Vdc   : DC bus voltage                    (V)   [state x5]
+%   Sae   : Switch signal                     {0,1} [control input]
+%
+% Outputs:
+%   diae  : d(iae)/dt                         (A/s)
+%   ia    : Current drawn from DC bus         (A)
+%   vae   : AE stack voltage                  (V)
+%   Pae   : AE power consumed                 (W)
+%   NH2   : Hydrogen production rate          (mol/s)
+% =========================================================================
+
+function [diae, ia, vae, Pae, NH2] = getAEBuckConverter(iae, Vdc, Sae)
+
+    % --- Converter parameter (Table 4, Zhu et al.) ---
+    Lae     = 01e-3;     % Buck converter inductance   [H]
+
+    % --- AE stack voltage: nonlinear coupling (Eq. 15) ---
+    % Clamp current positive; getAE handles its own internal guard
+    iae_safe            = max(iae, 0);
+    [vae, Pae, NH2, ~]  = getAE(iae_safe);
+
+    % --- State equation (Eq. 13) ---
+    % Lae * diae/dt = Sae * Vdc - vae(iae)
+    diae    = (Sae * Vdc - vae) / Lae;
+
+    % --- Current drawn from DC bus ---
+    % ia = Sae * iae
+    ia      = Sae * iae_safe;
+
+end
+================================================================================
+FILE: getBattery.m
+================================================================================
+% =========================================================================
+% getBattery.m
+% Battery Energy Storage System (BESS) Model
+%
+% This function models a basic Battery using an internal resistance model
+% and Coulomb counting for State of Charge (SOC) tracking.
+%
+% Inputs:
+%   I_bat    : Battery current (A) - Positive for discharge, negative for charge
+%   SOC      : Current State of Charge (fraction, 0 to 1)
+%
+% Outputs:
+%   V_bat    : Battery terminal voltage (V)
+%   dSOC     : Derivative of State of Charge (1/s)
+%   P_bat    : Battery output power (W)
+% =========================================================================
+function [V_bat, dSOC, P_bat] = getBattery(I_bat, SOC)
+
+    % --- Battery Parameters ---
+    V_nom    = 240;            % Nominal voltage (V)
+    R_int    = 0.15;           % Internal resistance (Ohms)
+    C_Ah     = 100;            % Battery capacity in Ampere-hours (Ah)
+    C_As     = C_Ah * 3600;    % Battery capacity in Ampere-seconds (Coulombs)
+
+    % --- SOC Derivative ---
+    dSOC = -I_bat / C_As;
+
+    % --- Terminal Voltage Calculation ---
+    V_bat = V_nom - I_bat * R_int;
+
+    % --- Power Calculation ---
+    P_bat = V_bat * I_bat;
+end
+================================================================================
+FILE: getBidirectionalConverter.m
+================================================================================
+% =========================================================================
+% getBidirectionalConverter.m
+% Bidirectional DC-DC Buck-Boost Converter for BESS
+%
+% Inputs:
+%   ib     : Battery inductor current (A) [State x6]
+%            (Positive = discharging, Negative = charging)
+%   Vbat   : Battery terminal voltage (V)
+%   Vdc    : DC bus voltage (V)
+%   db     : Duty cycle of the lower switch (0 to 1)
+%
+% Outputs:
+%   dib    : Derivative of battery inductor current (A/s)
+%   ib_bus : Current injected into/drawn from the DC bus (A)
+% =========================================================================
+
+function [dib, ib_bus] = getBidirectionalConverter(ib, Vbat, Vdc, db)
+
+    Lb = 2e-3; % Battery converter inductance [H]
+
+    dib = (Vbat - (1 - db) * Vdc) / Lb;
+    ib_bus = (1 - db) * ib;
+
+end
+================================================================================
+FILE: getDCBus.m
+================================================================================
+% =========================================================================
+% getDCBus.m
+% DC Bus Voltage Dynamics
+% Implements Equation 10 from Zhu et al., Renewable Energy 222 (2024) 119871
+%
+% Inputs:
+%   Vdc   : DC bus voltage                    (V)   [state x5]
+%   is    : PV converter output current       (A)   [from getPVBoostConverter]
+%   ip    : PEMFC converter output current    (A)   [from getPEMFCBoostConverter]
+%   ia    : AE converter input current        (A)   [from getAEBuckConverter]
+%   ib_bus: Battery converter output current  (A)   [from getBidirectionalConverter]
+%   Pload : Load power demand                 (W)   [disturbance]
+%
+% Output:
+%   dVdc  : d(Vdc)/dt                         (V/s)
+%   il    : Load current                      (A)
+% =========================================================================
+
+function [dVdc, il] = getDCBus(Vdc, is, ip, ia, varargin)
+
+    if nargin == 5
+        ib_bus = 0;
+        Pload  = varargin{1};
+    else
+        ib_bus = varargin{1};
+        Pload  = varargin{2};
+    end
+
+    % --- DC bus parameter (Table 4, Zhu et al.) ---
+    Cdc     = 30e-3;    % DC bus capacitance          [F]
+
+    % --- Load current (constant power load model) ---
+    % il = Pload / Vdc
+    Vdc_safe    = max(Vdc, 1);      % Prevent division by zero
+    il          = Pload / Vdc_safe;
+
+    % --- DC bus state equation (Eq. 10) ---
+    % Cdc * dVdc/dt = is + ip + ib_bus - ia - il
+    dVdc    = (is + ip + ib_bus - ia - il) / Cdc;
+
+end
+%%
+% 
+% ---
+% 
+% **How these four files connect:**
+% ```
+% G, T, vpv ──► getPVBoostConverter ──► dvpv, diL, is, Ppv ──┐
+%                                                               │
+% iae, Vdc ───► getAEBuckConverter  ──► diae, ia, vae, Pae ───┤──► getDCBus ──► dVdc
+%                                                               │
+% ipe, Vdc ───► getPEMFCBoostConverter ► dipe, ip, vpe, Ppe ──┘
+
+================================================================================
+FILE: getDEMPC_AES.m
+================================================================================
+% =========================================================================
+% getDEMPC_AES.m
+% Local Distributed Economic MPC for the Alkaline Electrolyzer Subsystem
+% Implements Equations 38-40 from Zhu et al., Renewable Energy 222 (2024)
+%
+% Inputs:
+%   xa        : AES local states [iae; Vdc]               (2x1)
+%   d_prev    : Previous duty cycle                       [0-1]
+%   Ppv_comm  : PV power from previous timestep           [W]  (communication)
+%   Ppe_comm  : PEMFC power from previous timestep        [W]  (communication)
+%   is_comm   : PV bus current from previous timestep     [A]  (communication)
+%   ip_comm   : PEMFC bus current from previous timestep  [A]  (communication)
+%   Pload     : Load power demand                         [W]
+%   Vdc_ref   : DC bus voltage reference this timestep    [V]
+%
+% Outputs:
+%   d_ae_opt  : Optimal duty cycle                        [0-1]
+%   Pae_comm  : AE power for communication to others      [W]
+%   ia_comm   : AE bus input current for communication    [A]
+%   NH2_comm  : H2 production rate for monitoring         [mol/s]
+% =========================================================================
+function [d_ae_opt, Pae_comm, ia_comm, NH2_comm] = getDEMPC_AES(xa, d_prev, ...
+    Ppv_comm, Ppe_comm, is_comm, ip_comm, Pload, Vdc_ref)
+
+    % ---- DEMPC parameters ----
+    Ts      = 40e-6;
+    Np      = 2;
+    
+    % Weights normalized to match CMPC stability
+    wa1     = 400;      % Weight: power balance (surplus tracking)
+    wa2     = 20000;    % Weight: Vdc regulation
+
+    % ---- Generate Dynamic Adaptive Grid ----
+    d_ae_grid = max(0.05, min(0.65, d_prev + linspace(-0.045, 0.045, 7)'));
+    n_dae    = length(d_ae_grid);
+    n_seq    = n_dae^Np;             % 7^2 = 49 combinations
+
+    seq_table = zeros(n_seq, Np);
+    for j = 1:n_seq
+        idx1 = mod(j-1, n_dae) + 1;
+        idx2 = floor((j-1) / n_dae) + 1;
+        seq_table(j,:) = [d_ae_grid(idx1), d_ae_grid(idx2)];
+    end
+
+    costs   = Inf(n_seq, 1);
+
+    % ---- Evaluate cost for each candidate sequence ----
+    for j = 1:n_seq
+        xa_pred     = xa;
+        total_cost  = 0;
+
+        for l = 1:Np
+            d_ae_l   = seq_table(j, l);
+
+            % --- One-step forward prediction (local AES model) ---
+            xa_pred = aes_predict(xa_pred, d_ae_l, is_comm, ip_comm, Pload, Ts);
+
+            % --- AE power and H2 rate at predicted iae ---
+            iae_l           = max(xa_pred(1), 1e-6);
+            [~, Pae_l, NH2_l, ~] = getAE(iae_l);
+
+            % --- Cost terms (Eq. 38) ---
+            % Droop target for Surplus Power
+            K_vdc    = 400; % [W/V] Proportional gain
+            Ptarget  = max(Ppv_comm + Ppe_comm - Pload + K_vdc * (xa(2) - Vdc_ref), 0);
+
+            la1 = ((Pae_l - Ptarget) / max(Ptarget, 1))^2;
+            la2 = ((xa_pred(2) - Vdc_ref) / Vdc_ref)^2;
+
+            total_cost  = total_cost + wa1*la1 + wa2*la2;
+        end
+
+        costs(j) = total_cost;
+    end
+
+    % ---- Select optimal sequence ----
+    [~, j_opt]  = min(costs);
+    d_ae_opt    = seq_table(j_opt, 1);
+
+    % ---- Compute communication variables from current measured state ----
+    iae_now             = max(xa(1), 1e-6);
+    [~, Pae_comm, NH2_comm, ~] = getAE(iae_now);
+    ia_comm             = d_ae_opt * max(xa(1), 0);
+
+end
+
+% =========================================================================
+% Local prediction model for AES — Forward Euler  (Eq. 13 + Eq. 10)
+% xa = [iae; Vdc]
+% Other subsystems' currents frozen at previous values (is_comm, ip_comm)
+% =========================================================================
+function xa_next = aes_predict(xa, d_ae, is_comm, ip_comm, Pload, Ts)
+
+    Lae = 1e-3;         % AE inductance   [H]
+    Cdc = 30e-3;        % Bus capacitance [F]
+
+    Ts_sub = Ts / 4;
+    xa_c   = xa;
+
+    for sub = 1:4
+        iae = max(xa_c(1), 0);
+        Vdc = max(xa_c(2), 1);
+
+        [vae, ~, ~, ~]  = getAE(max(iae, 1e-6));
+        il              = Pload / Vdc;
+        ia              = d_ae * iae;
+
+        diae    = (d_ae * Vdc - vae) / Lae;
+        dVdc    = (is_comm + ip_comm - ia - il) / Cdc;
+
+        xa_c        = xa_c + Ts_sub * [diae; dVdc];
+        xa_c(1)     = max(xa_c(1), 0);
+        xa_c(2)     = max(xa_c(2), 1);
+    end
+
+    xa_next = xa_c;
+end
+================================================================================
+FILE: getDEMPC_AES_GWO.m
+================================================================================
+% =========================================================================
+% getDEMPC_AES_GWO.m
+% Local DEMPC for the AE Subsystem using Grey Wolf Optimizer.
+% =========================================================================
+function [d_ae_opt, Pae_comm, ia_comm, NH2_comm] = getDEMPC_AES_GWO(xa, ...
+    Ppv_comm, Ppe_comm, is_comm, ip_comm, Pload, Vdc_ref)
+
+    % ---- DEMPC parameters ----
+    Ts      = 40e-6;
+    Np      = 2;
+    wa1     = 400;
+    wa2     = 20000;
+
+    % ---- GWO parameters ----
+    maxIter     = 10;
+    wolfCount   = 8;
+    lowerBound  = 0.05;
+    upperBound  = 0.65;
+
+    % ---- Define Cost Function for GWO ----
+    costFunction = @(d_seq) calculate_cost(d_seq);
+
+    % ---- Run GWO to find optimal sequence ----
+    [best_d_seq, ~] = optimizeDutyCycleGWO(costFunction, Np, lowerBound, upperBound, maxIter, wolfCount);
+    d_ae_opt = best_d_seq(1);
+
+    % ---- Compute communication variables ----
+    iae_now             = max(xa(1), 1e-6);
+    [~, Pae_comm, NH2_comm, ~] = getAE(iae_now);
+    ia_comm             = d_ae_opt * max(xa(1), 0);
+
+    % =====================================================================
+    % NESTED COST FUNCTION
+    % =====================================================================
+    function total_cost = calculate_cost(d_ae_sequence)
+        xa_pred     = xa;
+        total_cost  = 0;
+
+        for l = 1:Np
+            d_ae_l   = d_ae_sequence(l);
+
+            % --- One-step forward prediction ---
+            xa_pred = aes_predict(xa_pred, d_ae_l, is_comm, ip_comm, Pload, Ts);
+
+            % --- AE power at predicted iae ---
+            iae_l           = max(xa_pred(1), 1e-6);
+            [~, Pae_l, ~, ~] = getAE(iae_l);
+
+            % --- Cost terms (Eq. 38) ---
+            K_vdc    = 400;
+            Ptarget  = max(Ppv_comm + Ppe_comm - Pload + K_vdc * (xa(2) - Vdc_ref), 0);
+
+            la1 = ((Pae_l - Ptarget) / max(Ptarget, 1))^2;
+            la2 = ((xa_pred(2) - Vdc_ref) / Vdc_ref)^2;
+
+            total_cost  = total_cost + wa1*la1 + wa2*la2;
+        end
+    end
+end
+
+% =========================================================================
+% Local prediction model for AES — Forward Euler  (Eq. 13 + Eq. 10)
+% xa = [iae; Vdc]
+% Other subsystems' currents frozen at previous values (is_comm, ip_comm)
+% =========================================================================
+function xa_next = aes_predict(xa, d_ae, is_comm, ip_comm, Pload, Ts)
+
+    Lae = 1e-3;         % AE inductance   [H]
+    Cdc = 30e-3;        % Bus capacitance [F]
+
+    Ts_sub = Ts / 4;
+    xa_c   = xa;
+
+    for sub = 1:4
+        iae = max(xa_c(1), 0);
+        Vdc = max(xa_c(2), 1);
+
+        [vae, ~, ~, ~]  = getAE(max(iae, 1e-6));
+        il              = Pload / Vdc;
+        ia              = d_ae * iae;
+
+        diae    = (d_ae * Vdc - vae) / Lae;
+        dVdc    = (is_comm + ip_comm - ia - il) / Cdc;
+
+        xa_c        = xa_c + Ts_sub * [diae; dVdc];
+        xa_c(1)     = max(xa_c(1), 0);
+        xa_c(2)     = max(xa_c(2), 1);
+    end
+
+    xa_next = xa_c;
+end
+================================================================================
+FILE: getDEMPC_BESS.m
+================================================================================
+% =========================================================================
+% getDEMPC_BESS.m
+% Local DMPC for Battery Energy Storage System (BESS) using Grid Search
+%
+% Inputs:
+%   xb        : State vector [ib; SOC; Vdc]
+%   db_prev   : Previous duty cycle
+%   Ppv_comm  : Communicated PV power
+%   Ppe_comm  : Communicated PEMFC power
+%   Pae_comm  : Communicated AE power
+%   is_comm   : Communicated PV current
+%   ip_comm   : Communicated PEMFC current
+%   ia_comm   : Communicated AE current
+%   Pload     : Load power demand
+%   Vdc_ref   : Reference DC bus voltage
+%
+% Outputs:
+%   db_opt    : Optimal duty cycle
+%   Pbat_comm : Expected Battery power
+%   ib_comm   : Expected Battery bus current
+% =========================================================================
+function [db_opt, Pbat_comm, ib_comm] = getDEMPC_BESS(xb, db_prev, Ppv_comm, Ppe_comm, Pae_comm, is_comm, ip_comm, ia_comm, Pload, Vdc_ref)
+
+    % Extracted states
+    ib  = xb(1);
+    SOC = xb(2);
+    Vdc = xb(3);
+
+    % MPC Parameters
+    Ts = 40e-6;
+    Np = 3;
+    db_set = linspace(0.1, 0.9, 11); % Limits duty cycle to avoid saturation
+    Pbat_max = 5000; % 5 kW safety limit
+
+    % Normalized Weights (Matching CMPC scale)
+    w_v   = 20000; % Heavily weight Vdc regulation
+    w_du  = 100;
+    w_p   = 5000;
+    w_lim = 50000; % High penalty for exceeding power limit
+    w_soc = 50000; % High penalty for violating SOC limits
+
+    J_min = inf;
+    db_opt = db_prev;
+
+    for i = 1:length(db_set)
+        db = db_set(i);
+        ib_pred = ib; SOC_pred = SOC; Vdc_pred = Vdc;
+        J_seq = 0; db_last = db_prev;
+
+        for k = 1:Np
+            [Vbat, dSOC, Pbat] = getBattery(ib_pred, SOC_pred);
+            [dib, ib_bus] = getBidirectionalConverter(ib_pred, Vbat, Vdc_pred, db);
+            [dVdc, ~] = getDCBus(Vdc_pred, is_comm, ip_comm, ia_comm, ib_bus, Pload);
+
+            ib_pred = ib_pred + Ts * dib;
+            SOC_pred = SOC_pred + Ts * dSOC;
+            Vdc_pred = Vdc_pred + Ts * dVdc;
+
+            Pbal = Ppv_comm + Ppe_comm + Pbat - Pae_comm - Pload;
+            Pbat_penalty = max(0, abs(Pbat) - Pbat_max);
+
+            SOC_penalty = 0;
+            if SOC_pred >= 0.90 && Pbat < 0
+                SOC_penalty = abs(Pbat); % Penalize charging when full
+            elseif SOC_pred <= 0.20 && Pbat > 0
+                SOC_penalty = abs(Pbat); % Penalize discharging when empty
+            end
+
+            ls_v   = ((Vdc_pred - Vdc_ref) / Vdc_ref)^2;
+            ls_du  = (db - db_last)^2;
+            ls_p   = (Pbal / max(Pload, 1))^2;
+            ls_lim = (Pbat_penalty / Pbat_max)^2;
+            ls_soc = (SOC_penalty / Pbat_max)^2;
+
+            J_seq = J_seq + w_v * ls_v ...
+                          + w_du * ls_du ...
+                          + w_p * ls_p ...
+                          + w_lim * ls_lim ...
+                          + w_soc * ls_soc;
+            db_last = db;
+        end
+
+        if J_seq < J_min
+            J_min = J_seq;
+            db_opt = db;
+        end
+    end
+
+    % Communication outputs
+    [Vbat, ~, Pbat_comm] = getBattery(ib, SOC);
+    [~, ib_comm] = getBidirectionalConverter(ib, Vbat, Vdc, db_opt);
+
+end
+================================================================================
+FILE: getDEMPC_BESS_GWO.m
+================================================================================
+% =========================================================================
+% getDEMPC_BESS_GWO.m
+% Local DMPC for Battery Energy Storage System (BESS) using GWO
+% =========================================================================
+function [db_opt, Pbat_comm, ib_comm] = getDEMPC_BESS_GWO(xb, Ppv_comm, Ppe_comm, Pae_comm, is_comm, ip_comm, ia_comm, Pload, Vdc_ref)
+
+    % Extracted states
+    ib  = xb(1);
+    SOC = xb(2);
+    Vdc = xb(3);
+
+    % MPC Parameters
+    Ts = 40e-6;
+    Np = 3;
+
+    % Cost function handle
+    costFunc = @(U_seq) evaluateCostBESS(U_seq, ib, SOC, Vdc, Ppv_comm, Ppe_comm, Pae_comm, is_comm, ip_comm, ia_comm, Pload, Vdc_ref, Ts, Np);
+
+    % GWO Parameters
+    dim = Np;
+    lowerBound = 0.1;
+    upperBound = 0.9;
+    maxIter = 20;   % Increased from 10
+    wolfCount = 10; % Increased from 5
+
+    % Run GWO
+    [bestSeq, ~] = optimizeDutyCycleGWO(costFunc, dim, lowerBound, upperBound, maxIter, wolfCount);
+    db_opt = bestSeq(1);
+
+    % Communication outputs
+    [Vbat, ~, Pbat_comm] = getBattery(ib, SOC);
+    [~, ib_comm] = getBidirectionalConverter(ib, Vbat, Vdc, db_opt);
+
+end
+
+function J = evaluateCostBESS(U_seq, ib, SOC, Vdc, Ppv, Ppe, Pae, is, ip, ia, Pload, Vdc_ref, Ts, Np)
+    w_v   = 20000;
+    w_du  = 100;
+    w_p   = 5000;
+    w_lim = 50000;
+    w_soc = 50000;
+    Pbat_max = 5000; % 5 kW safety limit
+
+    J = 0;
+    db_last = U_seq(1);
+
+    for k = 1:Np
+        db = U_seq(k);
+        [Vbat, dSOC, Pbat] = getBattery(ib, SOC);
+        [dib, ib_bus] = getBidirectionalConverter(ib, Vbat, Vdc, db);
+        [dVdc, ~] = getDCBus(Vdc, is, ip, ia, ib_bus, Pload);
+
+        ib = ib + Ts * dib;
+        SOC = SOC + Ts * dSOC;
+        Vdc = Vdc + Ts * dVdc;
+
+        Pbal = Ppv + Ppe + Pbat - Pae - Pload;
+        Pbat_penalty = max(0, abs(Pbat) - Pbat_max);
+
+        SOC_penalty = 0;
+        if SOC >= 0.90 && Pbat < 0
+            SOC_penalty = abs(Pbat); % Penalize charging when full
+        elseif SOC <= 0.20 && Pbat > 0
+            SOC_penalty = abs(Pbat); % Penalize discharging when empty
+        end
+
+        ls_v   = ((Vdc - Vdc_ref) / Vdc_ref)^2;
+        ls_du  = (db - db_last)^2;
+        ls_p   = (Pbal / max(Pload, 1))^2;
+        ls_lim = (Pbat_penalty / Pbat_max)^2;
+        ls_soc = (SOC_penalty / Pbat_max)^2;
+
+        J = J + w_v * ls_v + w_du * ls_du + w_p * ls_p + w_lim * ls_lim + w_soc * ls_soc;
+        db_last = db;
+    end
+end
+================================================================================
+FILE: getDEMPC_PEMFCS.m
+================================================================================
+% =========================================================================
+% getDEMPC_PEMFCS.m
+% Local Distributed Economic MPC for the PEMFC Subsystem
+% Implements Equations 41-43 from Zhu et al., Renewable Energy 222 (2024)
+%
+% Inputs:
+%   xp        : PEMFCS local states [ipe; Vdc]            (2x1)
+%   d_prev    : Previous duty cycle                       [0-1]
+%   Ppv_comm  : PV power from previous timestep           [W]  (communication)
+%   Pae_comm  : AE power from previous timestep           [W]  (communication)
+%   is_comm   : PV bus current from previous timestep     [A]  (communication)
+%   ia_comm   : AE bus current from previous timestep     [A]  (communication)
+%   Pload     : Load power demand                         [W]
+%   Vdc_ref   : DC bus voltage reference this timestep    [V]
+%
+% Outputs:
+%   d_pe_opt  : Optimal duty cycle                        [0-1]
+%   Ppe_comm  : PEMFC power for communication to others   [W]
+%   ip_comm   : PEMFC bus current for communication       [A]
+% =========================================================================
+function [d_pe_opt, Ppe_comm, ip_comm] = getDEMPC_PEMFCS(xp, d_prev, ...
+    Ppv_comm, Pae_comm, is_comm, ia_comm, Pload, Vdc_ref)
+
+    % ---- DEMPC parameters ----
+    Ts      = 40e-6;
+    Np      = 2;
+    
+    % Weights normalized to match CMPC stability
+    wp1     = 400;      % Weight: power balance (deficit tracking)
+    wp2     = 20000;    % Weight: Vdc regulation
+
+    % ---- Generate Dynamic Adaptive Grid ----
+    d_pe_grid = max(0.05, min(0.95, d_prev + linspace(-0.045, 0.045, 7)'));
+    n_dpe    = length(d_pe_grid);
+    n_seq    = n_dpe^Np;
+
+    seq_table = zeros(n_seq, Np);
+    for j = 1:n_seq
+        idx1 = mod(j-1, n_dpe) + 1;
+        idx2 = floor((j-1) / n_dpe) + 1;
+        seq_table(j,:) = [d_pe_grid(idx1), d_pe_grid(idx2)];
+    end
+
+    costs   = Inf(n_seq, 1);
+
+    % ---- Evaluate cost for each candidate sequence ----
+    for j = 1:n_seq
+        xp_pred     = xp;
+        total_cost  = 0;
+
+        for l = 1:Np
+            d_pe_l   = seq_table(j, l);
+
+            % --- One-step forward prediction (local PEMFCS model) ---
+            xp_pred = pemfcs_predict(xp_pred, d_pe_l, is_comm, ia_comm, Pload, Ts);
+
+            % --- PEMFC power at predicted ipe ---
+            ipe_l           = max(xp_pred(1), 1e-6);
+            [~, Ppe_l, ~]   = getPEMFC(ipe_l);
+
+            % --- Cost terms (Eq. 41) ---
+            % Droop target for Deficit Power
+            K_vdc    = 400; % [W/V] Proportional gain
+            Ptarget  = max(Pload + Pae_comm - Ppv_comm - K_vdc * (xp(2) - Vdc_ref), 0);
+
+            lp1 = ((Ppe_l - Ptarget) / max(Ptarget, 1))^2;
+            lp2 = ((xp_pred(2) - Vdc_ref) / Vdc_ref)^2;
+
+            total_cost  = total_cost + wp1*lp1 + wp2*lp2;
+        end
+
+        costs(j) = total_cost;
+    end
+
+    % ---- Select optimal sequence ----
+    [~, j_opt]  = min(costs);
+    d_pe_opt    = seq_table(j_opt, 1);
+
+    % ---- Compute communication variables from current measured state ----
+    ipe_now         = max(xp(1), 1e-6);
+    [~, Ppe_comm, ~] = getPEMFC(ipe_now);
+    ip_comm         = (1 - d_pe_opt) * max(xp(1), 0);
+
+end
+
+% =========================================================================
+% Local prediction model for PEMFCS — Forward Euler (4 sub-steps)
+% xp = [ipe; Vdc]
+% Other subsystems' currents frozen at previous values (is_comm, ia_comm)
+% =========================================================================
+function xp_next = pemfcs_predict(xp, d_pe, is_comm, ia_comm, Pload, Ts)
+
+    Lpe = 1e-3;         % FC inductance   [H]
+    Cdc = 30e-3;        % Bus capacitance [F]
+
+    Ts_sub = Ts / 4;
+    xp_c   = xp;
+
+    for sub = 1:4
+        ipe = max(xp_c(1), 0);
+        Vdc = max(xp_c(2), 1);
+
+        [vpe, ~, ~]     = getPEMFC(max(ipe, 1e-6));
+        il              = Pload / Vdc;
+        ip              = (1 - d_pe) * ipe;
+
+        dipe    = (vpe - (1 - d_pe) * Vdc) / Lpe;
+        dVdc    = (is_comm + ip - ia_comm - il) / Cdc;
+
+        xp_c        = xp_c + Ts_sub * [dipe; dVdc];
+        xp_c(1)     = max(xp_c(1), 0);
+        xp_c(2)     = max(xp_c(2), 1);
+    end
+
+    xp_next = xp_c;
+end
+================================================================================
+FILE: getDEMPC_PEMFCS_GWO.m
+================================================================================
+% =========================================================================
+% getDEMPC_PEMFCS_GWO.m
+% Local DEMPC for the PEMFC Subsystem using Grey Wolf Optimizer.
+% =========================================================================
+function [d_pe_opt, Ppe_comm, ip_comm] = getDEMPC_PEMFCS_GWO(xp, ...
+    Ppv_comm, Pae_comm, is_comm, ia_comm, Pload, Vdc_ref)
+
+    % ---- DEMPC parameters ----
+    Ts      = 40e-6;
+    Np      = 2;
+    wp1     = 400;
+    wp2     = 20000;
+
+    % ---- GWO parameters ----
+    maxIter     = 10;
+    wolfCount   = 8;
+    lowerBound  = 0.05;
+    upperBound  = 0.95;
+
+    % ---- Define Cost Function for GWO ----
+    costFunction = @(d_seq) calculate_cost(d_seq);
+
+    % ---- Run GWO to find optimal sequence ----
+    [best_d_seq, ~] = optimizeDutyCycleGWO(costFunction, Np, lowerBound, upperBound, maxIter, wolfCount);
+    d_pe_opt = best_d_seq(1);
+
+    % ---- Compute communication variables ----
+    ipe_now         = max(xp(1), 1e-6);
+    [~, Ppe_comm, ~] = getPEMFC(ipe_now);
+    ip_comm         = (1 - d_pe_opt) * max(xp(1), 0);
+
+    % =====================================================================
+    % NESTED COST FUNCTION
+    % =====================================================================
+    function total_cost = calculate_cost(d_pe_sequence)
+        xp_pred     = xp;
+        total_cost  = 0;
+
+        for l = 1:Np
+            d_pe_l   = d_pe_sequence(l);
+
+            % --- One-step forward prediction ---
+            xp_pred = pemfcs_predict(xp_pred, d_pe_l, is_comm, ia_comm, Pload, Ts);
+
+            % --- PEMFC power at predicted ipe ---
+            ipe_l           = max(xp_pred(1), 1e-6);
+            [~, Ppe_l, ~]   = getPEMFC(ipe_l);
+
+            % --- Cost terms (Eq. 41) ---
+            K_vdc    = 400;
+            Ptarget  = max(Pload + Pae_comm - Ppv_comm - K_vdc * (xp(2) - Vdc_ref), 0);
+
+            lp1 = ((Ppe_l - Ptarget) / max(Ptarget, 1))^2;
+            lp2 = ((xp_pred(2) - Vdc_ref) / Vdc_ref)^2;
+
+            total_cost  = total_cost + wp1*lp1 + wp2*lp2;
+        end
+    end
+end
+
+% =========================================================================
+% Local prediction model for PEMFCS — Forward Euler (4 sub-steps)
+% xp = [ipe; Vdc]
+% Other subsystems' currents frozen at previous values (is_comm, ia_comm)
+% =========================================================================
+function xp_next = pemfcs_predict(xp, d_pe, is_comm, ia_comm, Pload, Ts)
+
+    Lpe = 1e-3;         % FC inductance   [H]
+    Cdc = 30e-3;        % Bus capacitance [F]
+
+    Ts_sub = Ts / 4;
+    xp_c   = xp;
+
+    for sub = 1:4
+        ipe = max(xp_c(1), 0);
+        Vdc = max(xp_c(2), 1);
+
+        [vpe, ~, ~]     = getPEMFC(max(ipe, 1e-6));
+        il              = Pload / Vdc;
+        ip              = (1 - d_pe) * ipe;
+
+        dipe    = (vpe - (1 - d_pe) * Vdc) / Lpe;
+        dVdc    = (is_comm + ip - ia_comm - il) / Cdc;
+
+        xp_c        = xp_c + Ts_sub * [dipe; dVdc];
+        xp_c(1)     = max(xp_c(1), 0);
+        xp_c(2)     = max(xp_c(2), 1);
+    end
+
+    xp_next = xp_c;
+end
+================================================================================
+FILE: getDEMPC_PVS.m
+================================================================================
+% =========================================================================
+% getDEMPC_PVS.m
+% Local Distributed Economic MPC for the PV Subsystem (PVS)
+% Implements Equations 33-37 from Zhu et al., Renewable Energy 222 (2024)
+%
+% MINLP: Enumerates all 2^Np switching sequences, selects minimum cost.
+%
+% Inputs:
+%   xs        : PVS local states [vpv; iL; Vdc]           (3x1)
+%   d_prev    : Previous duty cycle                       [0-1]
+%   Pmax      : PV maximum power at current conditions    [W]
+%   Ppe_comm  : PEMFC power from previous timestep        [W]  (communication)
+%   Pae_comm  : AE power from previous timestep           [W]  (communication)
+%   ip_comm   : PEMFC bus current from previous timestep  [A]  (communication)
+%   ia_comm   : AE bus current from previous timestep     [A]  (communication)
+%   Pload     : Load power demand                         [W]
+%   Vdc_ref   : DC bus voltage reference this timestep    [V]  (Eq. 34)
+%   G         : Solar irradiance                          [W/m^2]
+%   T         : PV cell temperature                       [degC]
+%
+% Outputs:
+%   d_s_opt   : Optimal duty cycle                        [0-1]
+%   Ppv_comm  : PV power for communication to others      [W]
+%   is_comm   : PV bus output current for communication   [A]
+% =========================================================================
+function [d_s_opt, Ppv_comm, is_comm] = getDEMPC_PVS(xs, d_prev, Pmax, ...
+    Ppe_comm, Pae_comm, ip_comm, ia_comm, Pload, Vdc_ref, G, T)
+
+    % ---- DEMPC parameters ----
+    Ts      = 40e-6;                % Sampling interval           [s]
+    Np      = 2;                    % Prediction horizon          [-]
+    
+    % Weights normalized to match CMPC stability
+    ws1     = 0;                    % Power balance (delegated entirely to AE/FC)
+    ws2     = 800;                  % Weight: MPPT
+    ws3     = 20000;                % Weight: Vdc regulation
+    ws4     = 400;                  % Weight: Inductor current tracking
+
+    % ---- PV array config ----
+    Ns_pv   = 5;                    % Series modules
+    Np_pv   = 20;                   % Parallel strings
+    Voc_mod = 47.6;                 % Module open-circuit voltage [V]
+    vpv_max = Ns_pv * Voc_mod;     % Max PV voltage constraint   [V] (Eq. 36e)
+
+    % --- Inductor current reference ---
+    V_sw        = linspace(0.1, Ns_pv * Voc_mod, 500);
+    [~, Pp_sw]  = getPVArray(V_sw, G, T, Ns_pv, Np_pv);
+    [~, mi]     = max(Pp_sw);
+    Vmpp        = V_sw(mi);
+    [Impp, ~]   = getPVArray(Vmpp, G, T, Ns_pv, Np_pv);
+    iL_ref      = Impp;
+
+    % ---- Generate Dynamic Adaptive Grid ----
+    d_s_grid = max(0.05, min(0.65, d_prev + linspace(-0.045, 0.045, 7)'));
+    n_ds     = length(d_s_grid);
+    n_seq    = n_ds^Np;             % 7^2 = 49 combinations
+
+    seq_table = zeros(n_seq, Np);
+    for j = 1:n_seq
+        idx1 = mod(j-1, n_ds) + 1;
+        idx2 = floor((j-1) / n_ds) + 1;
+        seq_table(j,:) = [d_s_grid(idx1), d_s_grid(idx2)];
+    end
+
+    costs   = Inf(n_seq, 1);
+
+    % ---- Evaluate cost for each candidate sequence ----
+    for j = 1:n_seq
+        xs_pred     = xs;
+        total_cost  = 0;
+        feasible    = true;
+
+        for l = 1:Np
+            d_s_l   = seq_table(j, l);
+
+            % --- One-step forward prediction (local PVS model) ---
+            xs_pred = pvs_predict(xs_pred, d_s_l, ip_comm, ia_comm, ...
+                                  Pload, G, T, Ts, Ns_pv, Np_pv);
+
+            % --- Constraint check: 0 <= vpv <= vpv_max  (Gamma_cs, Eq. 37) ---
+            if xs_pred(1) < 0 || xs_pred(1) > vpv_max
+                feasible = false;
+                break;
+            end
+
+            % --- PV power at predicted state ---
+            vpv_l       = max(xs_pred(1), 0);
+            [ipv_l, ~]  = getPVArray(vpv_l, G, T, Ns_pv, Np_pv);
+            Ppv_l       = vpv_l * ipv_l;
+
+            % --- Cost terms (Eq. 33) ---
+            % Normalized identically to CMPC
+            ls1 = 0; % PV does not explicitly load-follow
+            ls2 = ((Ppv_l - Pmax) / max(Pmax, 1))^2;
+            ls3 = ((xs_pred(3) - Vdc_ref) / Vdc_ref)^2;
+            ls4 = ((xs_pred(2) - iL_ref) / max(iL_ref, 1))^2;
+
+            total_cost  = total_cost + ws1*ls1 + ws2*ls2 + ws3*ls3 + ws4*ls4;
+        end
+
+        if feasible
+            costs(j) = total_cost;
+        end
+    end
+
+    % ---- Select optimal sequence (Algorithm 1, Step 3) ----
+    [~, j_opt]  = min(costs);
+    d_s_opt     = seq_table(j_opt, 1);
+
+    % ---- Compute communication variables from current measured state ----
+    vpv_now         = max(xs(1), 0);
+    [ipv_now, ~]    = getPVArray(vpv_now, G, T, Ns_pv, Np_pv);
+    Ppv_comm        = vpv_now * ipv_now;
+    is_comm         = (1 - d_s_opt) * max(xs(2), 0);
+
+end
+
+% =========================================================================
+% Local prediction model for PVS — Forward Euler (4 sub-steps)
+% xs = [vpv; iL; Vdc]
+% Other subsystems' currents frozen at previous values (ip_comm, ia_comm)
+% =========================================================================
+function xs_next = pvs_predict(xs, d_s, ip_comm, ia_comm, Pload, G, T, Ts, Ns_pv, Np_pv)
+
+    Cs  = 2000e-6;      % PV capacitance  [F]
+    Ls  = 1e-3;         % PV inductance   [H]
+    Cdc = 30e-3;        % Bus capacitance [F]
+    
+    Ts_sub = Ts / 4;
+    xs_c   = xs;
+
+    for sub = 1:4
+        vpv = max(xs_c(1), 0);
+        iL  = max(xs_c(2), 0);
+        Vdc = max(xs_c(3), 1);
+
+        [ipv, ~]    = getPVArray(vpv, G, T, Ns_pv, Np_pv);
+        il          = Pload / Vdc;
+        is          = (1 - d_s) * iL;
+
+        dvpv    = (ipv - iL) / Cs;
+        diL     = (vpv - (1 - d_s) * Vdc) / Ls;
+        dVdc    = (is + ip_comm - ia_comm - il) / Cdc;
+
+        xs_c        = xs_c + Ts_sub * [dvpv; diL; dVdc];
+        xs_c(1)     = max(xs_c(1), 0);
+        xs_c(2)     = max(xs_c(2), 0);
+        xs_c(3)     = max(xs_c(3), 1);
+    end
+    
+    xs_next = xs_c;
+end
+================================================================================
+FILE: getDEMPC_PVS_GWO.m
+================================================================================
+% =========================================================================
+% getDEMPC_PVS_GWO.m
+% Local DEMPC for the PV Subsystem using Grey Wolf Optimizer.
+%
+% Replaces the grid search from the original getDEMPC_PVS.m with a
+% metaheuristic optimization to find the optimal duty cycle sequence.
+% =========================================================================
+function [d_s_opt, Ppv_comm, is_comm] = getDEMPC_PVS_GWO(xs, Pmax, ...
+    Ppe_comm, Pae_comm, ip_comm, ia_comm, Pload, Vdc_ref, G, T)
+
+    % ---- DEMPC parameters ----
+    Ts      = 40e-6;
+    Np      = 2;
+    ws1     = 0;
+    ws2     = 800;
+    ws3     = 20000;
+    ws4     = 400;
+
+    % ---- PV array config ----
+    Ns_pv   = 5;
+    Np_pv   = 20;
+    Voc_mod = 47.6;
+    vpv_max = Ns_pv * Voc_mod;
+
+    % --- Inductor current reference ---
+    V_sw        = linspace(0.1, Ns_pv * Voc_mod, 500);
+    [~, Pp_sw]  = getPVArray(V_sw, G, T, Ns_pv, Np_pv);
+    [~, mi]     = max(Pp_sw);
+    Vmpp        = V_sw(mi);
+    [Impp, ~]   = getPVArray(Vmpp, G, T, Ns_pv, Np_pv);
+    iL_ref      = Impp;
+
+    % ---- GWO parameters ----
+    maxIter     = 10; % Keep low for speed
+    wolfCount   = 8;  % Keep low for speed
+    lowerBound  = 0.05;
+    upperBound  = 0.65;
+
+    % ---- Define Cost Function for GWO ----
+    costFunction = @(d_seq) calculate_cost(d_seq);
+
+    % ---- Run GWO to find optimal sequence ----
+    [best_d_seq, ~] = optimizeDutyCycleGWO(costFunction, Np, lowerBound, upperBound, maxIter, wolfCount);
+    d_s_opt = best_d_seq(1);
+
+    % ---- Compute communication variables ----
+    vpv_now         = max(xs(1), 0);
+    [ipv_now, ~]    = getPVArray(vpv_now, G, T, Ns_pv, Np_pv);
+    Ppv_comm        = vpv_now * ipv_now;
+    is_comm         = (1 - d_s_opt) * max(xs(2), 0);
+
+    % =====================================================================
+    % NESTED COST FUNCTION
+    % =====================================================================
+    function total_cost = calculate_cost(d_s_sequence)
+        xs_pred     = xs;
+        total_cost  = 0;
+
+        for l = 1:Np
+            d_s_l   = d_s_sequence(l);
+
+            % --- One-step forward prediction (local PVS model) ---
+            xs_pred = pvs_predict(xs_pred, d_s_l, ip_comm, ia_comm, ...
+                                  Pload, G, T, Ts, Ns_pv, Np_pv);
+
+            % --- Constraint check ---
+            if xs_pred(1) < 0 || xs_pred(1) > vpv_max
+                total_cost = 1e9; % High penalty for infeasible solution
+                return;
+            end
+
+            % --- PV power at predicted state ---
+            vpv_l       = max(xs_pred(1), 0);
+            [ipv_l, ~]  = getPVArray(vpv_l, G, T, Ns_pv, Np_pv);
+            Ppv_l       = vpv_l * ipv_l;
+
+            % --- Cost terms (Eq. 33) ---
+            ls1 = 0;
+            ls2 = ((Ppv_l - Pmax) / max(Pmax, 1))^2;
+            ls3 = ((xs_pred(3) - Vdc_ref) / Vdc_ref)^2;
+            ls4 = ((xs_pred(2) - iL_ref) / max(iL_ref, 1))^2;
+
+            total_cost  = total_cost + ws1*ls1 + ws2*ls2 + ws3*ls3 + ws4*ls4;
+        end
+    end
+end
+
+% =========================================================================
+% Local prediction model for PVS — Forward Euler (4 sub-steps)
+% xs = [vpv; iL; Vdc]
+% Other subsystems' currents frozen at previous values (ip_comm, ia_comm)
+% =========================================================================
+function xs_next = pvs_predict(xs, d_s, ip_comm, ia_comm, Pload, G, T, Ts, Ns_pv, Np_pv)
+
+    Cs  = 2000e-6;      % PV capacitance  [F]
+    Ls  = 1e-3;         % PV inductance   [H]
+    Cdc = 30e-3;        % Bus capacitance [F]
+    
+    Ts_sub = Ts / 4;
+    xs_c   = xs;
+
+    for sub = 1:4
+        vpv = max(xs_c(1), 0);
+        iL  = max(xs_c(2), 0);
+        Vdc = max(xs_c(3), 1);
+
+        [ipv, ~]    = getPVArray(vpv, G, T, Ns_pv, Np_pv);
+        il          = Pload / Vdc;
+        is          = (1 - d_s) * iL;
+
+        dvpv    = (ipv - iL) / Cs;
+        diL     = (vpv - (1 - d_s) * Vdc) / Ls;
+        dVdc    = (is + ip_comm - ia_comm - il) / Cdc;
+
+        xs_c        = xs_c + Ts_sub * [dvpv; diL; dVdc];
+        xs_c(1)     = max(xs_c(1), 0);
+        xs_c(2)     = max(xs_c(2), 0);
+        xs_c(3)     = max(xs_c(3), 1);
+    end
+    
+    xs_next = xs_c;
+end
+================================================================================
+FILE: getEMS.m
+================================================================================
+% =========================================================================
+% getEMS.m
+% Energy Management System
+% Implements Equation 32 from Zhu et al., Renewable Energy 222 (2024) 119871
+%
+% Inputs:
+%   Pmax  : PV maximum available power    [W]
+%   Pload : Load power demand             [W]
+%   SOC   : Battery State of Charge       [0 to 1]
+%
+% Outputs:
+%   zeta_a : AES  operational mode  (1=ON, 0=OFF)
+%   zeta_p : PEMFCS operational mode (1=ON, 0=OFF)
+% =========================================================================
+function [zeta_a, zeta_p] = getEMS(Pmax, Pload, SOC)
+
+    P_bat_max = 5000; % 5 kW power limit for the battery
+    SOC_min   = 0.20; % 20% minimum SOC
+    SOC_max   = 0.90; % 90% maximum SOC
+    P_net     = Pmax - Pload; % Available energy balance
+
+    % Default state: Both H2 systems idle
+    zeta_a = 0;
+    zeta_p = 0;
+
+    % Evaluate surplus conditions
+    if P_net > P_bat_max || (P_net > 0 && SOC >= SOC_max)
+        % AE absorbs if surplus > 5 kW OR if battery is full
+        zeta_a = 1;
+    end
+
+    % Evaluate deficit conditions
+    if P_net < -P_bat_max || (P_net < 0 && SOC <= SOC_min)
+        % FC supplies if deficit > 5 kW OR if battery is empty
+        zeta_p = 1;
+    end
+
+end
+================================================================================
+FILE: getHydrogenTank.m
+================================================================================
+% =========================================================================
+% getHydrogenTank.m
+% Compressed Hydrogen Tank Model
+%
+% This function models a compressed hydrogen storage tank using the ideal
+% gas law to determine the pressure based on the net flow of hydrogen.
+%
+% Inputs:
+%   n_H2_prev : Previous amount of hydrogen in the tank (mol)
+%   NH2       : Hydrogen production rate from Electrolyzer (mol/s)
+%   qH2       : Hydrogen consumption rate by PEMFC (mol/s)
+%   Ts        : Sampling time (s)
+%
+% Outputs:
+%   P_tank    : Current tank pressure (Pa)
+%   n_H2_new  : Updated amount of hydrogen in the tank (mol)
+% =========================================================================
+
+function [P_tank, n_H2_new] = getHydrogenTank(n_H2_prev, NH2, qH2, Ts)
+    % Tank Parameters
+    V_tank = 0.1;           % Volume of the tank (m^3)
+    T_tank = 298.15;        % Operating temperature (K) (approx 25 C)
+    R      = 8.31446;       % Universal gas constant (J/(mol*K))
+
+    % Mass Balance (Euler Integration)
+    n_H2_new = max(n_H2_prev + (NH2 - qH2) * Ts, 0);
+
+    % Pressure Calculation (Ideal Gas Law)
+    P_tank = (n_H2_new * R * T_tank) / V_tank;
+end
+================================================================================
+FILE: getMicrogridModel.m
+================================================================================
+% =========================================================================
+% getMicrogridModel.m
+% Complete Nonlinear State-Space Model of PV/Hydrogen DC Microgrid
+%
+% Assembles all subsystem state equations into one function of the form:
+%   xdot = f(x, u, w)
+% for use in MPC prediction, open-loop simulation, and validation.
+%
+% Reference: Zhu et al., Renewable Energy 222 (2024) 119871
+%            Equations 8, 10, 13, 28
+%
+% State vector x (7x1):
+%   x(1) = vpv   : PV capacitor voltage          [V]
+%   x(2) = iL    : PV boost inductor current      [A]
+%   x(3) = iae   : AE buck inductor/AE current    [A]
+%   x(4) = ipe   : PEMFC boost inductor/FC current [A]
+%   x(5) = Vdc   : DC bus voltage                 [V]
+%   x(6) = ib    : Battery inductor current       [A]
+%   x(7) = SOC   : Battery State of Charge        [-]
+%
+% Control vector u (4x1):
+%   u(1) = Ss    : PV boost switch signal         {0,1}
+%   u(2) = Sae   : AE buck switch signal          {0,1}
+%   u(3) = Spe   : PEMFC boost switch signal      {0,1}
+%   u(4) = Sb    : Battery bidirectional switch   {0,1}
+%
+% Disturbance vector w (3x1):
+%   w(1) = G     : Solar irradiance               [W/m^2]
+%   w(2) = T     : PV cell temperature            [degC]
+%   w(3) = Pload : Load power demand              [W]
+%
+% Outputs:
+%   xdot  : State derivative vector (7x1)         [mixed units/s]
+%   aux   : Auxiliary signals struct for monitoring and MPC cost function
+%             .Ppv   : PV array power             [W]
+%             .Pae   : AE power consumed          [W]
+%             .Ppe   : PEMFC power output         [W]
+%             .Pbat  : Battery power              [W]
+%             .NH2   : H2 production rate (AE)    [mol/s]
+%             .qH2   : H2 consumption rate (FC)   [mol/s]
+%             .vae   : AE stack voltage            [V]
+%             .vpe   : PEMFC stack voltage         [V]
+%             .Vbat  : Battery stack voltage       [V]
+%             .SOC   : Battery State of Charge     [-]
+%             .is    : PV converter output current [A]
+%             .ia    : AE converter input current  [A]
+%             .ip    : PEMFC converter output curr [A]
+%             .ib_bus: Battery bus current         [A]
+%             .il    : Load current                [A]
+%             .Pbal  : Power balance error (gen-load) [W]
+% =========================================================================
+
+function [xdot, aux] = getMicrogridModel(x, u, w)
+
+    % =====================================================================
+    % UNPACK STATE VECTOR
+    % =====================================================================
+    vpv     = x(1);
+    iL      = x(2);
+    iae     = x(3);
+    ipe     = x(4);
+    Vdc     = x(5);
+    ib      = x(6);
+    SOC     = x(7);
+
+    % =====================================================================
+    % UNPACK CONTROL VECTOR
+    % =====================================================================
+    Ss      = u(1);
+    Sae     = u(2);
+    Spe     = u(3);
+    Sb      = u(4);
+
+    % =====================================================================
+    % UNPACK DISTURBANCE VECTOR
+    % =====================================================================
+    G       = w(1);
+    T       = w(2);
+    Pload   = w(3);
+
+    % =====================================================================
+    % SUBSYSTEM 1: PV Boost Converter                            [Eq. 8]
+    % States updated: x(1)=vpv, x(2)=iL
+    % Also produces: is (current injected to DC bus), Ppv
+    % =====================================================================
+    [dvpv, diL, is, Ppv] = getPVBoostConverter(vpv, iL, Vdc, Ss, G, T);
+
+    % =====================================================================
+    % SUBSYSTEM 2: AE Buck Converter                             [Eq. 13]
+    % State updated: x(3)=iae
+    % Also produces: ia (current drawn from DC bus), vae, Pae, NH2
+    % =====================================================================
+    [diae, ia, vae, Pae, NH2] = getAEBuckConverter(iae, Vdc, Sae);
+
+    % Virtual contactor: if EMS disabled AE (Sae == 0), completely isolate it
+    if Sae == 0
+        diae = 0; ia = 0; Pae = 0; NH2 = 0;
+    end
+
+    % =====================================================================
+    % SUBSYSTEM 3: PEMFC Boost Converter                         [Eq. 28]
+    % State updated: x(4)=ipe
+    % Also produces: ip (current injected to DC bus), vpe, Ppe, qH2
+    % =====================================================================
+    [dipe, ip, vpe, Ppe, qH2] = getPEMFCBoostConverter(ipe, Vdc, Spe);
+
+    % Virtual contactor: if EMS disabled FC (Spe == 0), completely isolate it
+    if Spe == 0
+        dipe = 0; ip = 0; Ppe = 0; qH2 = 0;
+    end
+
+    % =====================================================================
+    % SUBSYSTEM 4: Battery & Bidirectional Converter
+    % States updated: x(6)=ib, x(7)=SOC
+    % Also produces: ib_bus, Pbat
+    % =====================================================================
+    [Vbat, dSOC, Pbat] = getBattery(ib, SOC);
+    [dib, ib_bus]      = getBidirectionalConverter(ib, Vbat, Vdc, Sb);
+
+    % =====================================================================
+    % SUBSYSTEM 5: DC Bus                                        [Eq. 10]
+    % State updated: x(5)=Vdc
+    % Receives is, ip, ib_bus from generators/storage and ia, il as sinks
+    % =====================================================================
+    [dVdc, il] = getDCBus(Vdc, is, ip, ia, ib_bus, Pload);
+
+    % =====================================================================
+    % ASSEMBLE STATE DERIVATIVE VECTOR
+    % =====================================================================
+    xdot    = [dvpv;    % dx(1)/dt
+               diL;     % dx(2)/dt
+               diae;    % dx(3)/dt
+               dipe;    % dx(4)/dt
+               dVdc;    % dx(5)/dt
+               dib;     % dx(6)/dt
+               dSOC];   % dx(7)/dt
+
+    % =====================================================================
+    % AUXILIARY OUTPUTS  (for MPC cost function and monitoring)
+    % =====================================================================
+    aux.Ppv     = Ppv;
+    aux.Pae     = Pae;
+    aux.Ppe     = Ppe;
+    aux.Pbat    = Pbat;
+    aux.NH2     = NH2;
+    aux.qH2     = qH2;
+    aux.vae     = vae;
+    aux.vpe     = vpe;
+    aux.Vbat    = Vbat;
+    aux.SOC     = SOC;
+    aux.is      = is;
+    aux.ia      = ia;
+    aux.ip      = ip;
+    aux.ib_bus  = ib_bus;
+    aux.il      = il;
+    aux.Pbal    = (Ppv + Ppe + Pbat) - (Pae + Pload);  % Power balance error [W]
+
+end
+================================================================================
+FILE: getPEMFC.m
+================================================================================
+% =========================================================================
+% getPEMFC.m
+% PEMFC Stack Model
+% Implements Equations 20-27 from:
+% "PV/Hydrogen DC microgrid control using distributed economic MPC"
+% Renewable Energy 222 (2024) 119871
+%
+% Inputs:
+%   ipe   : PEMFC stack current (A) - scalar or vector
+%
+% Outputs:
+%   vpe   : PEMFC stack output voltage (V)
+%   Ppe   : PEMFC stack output power (W)
+%   qH2   : Hydrogen consumption rate (mol/s)
+% =========================================================================
+
+function [vpe, Ppe, qH2] = getPEMFC(ipe)
+
+    % =====================================================================
+    % PEMFC STACK PARAMETERS  (Table 4 of reference paper)
+    % =====================================================================
+    Npe     = 300;              % Number of fuel cells in series          [-]
+    Tpe     = 323.15;           % Fuel cell operating temperature         [K]
+    PH2     = 3;                % Partial pressure of hydrogen            [atm]
+    PO2     = 3;                % Partial pressure of oxygen              [atm]
+    Ape_cm2 = 50;               % Membrane activation area                [cm^2]
+    Ape_m2  = Ape_cm2 * 1e-4;  % Membrane activation area                [m^2]
+    lambda  = 20;               % Water content of membrane               [-]
+    l_mem   = 5.1e-5;           % Membrane thickness                      [m]
+    Rc      = 3e-4;             % Contact resistance                      [Ohm]
+    Jmax    = 1.5;              % Maximum current density                 [A/cm^2]
+
+    % Physical constant
+    F       = 96485.3;          % Faraday constant                        [C/mol]
+
+    % =====================================================================
+    % STEP 1: Oxygen concentration at cathode-catalyst interface  [Eq. 25]
+    % CO2 = PO2 / (5.08e6 * exp(-498 / Tpe))
+    % Units: PO2 in atm, result in mol/cm^3
+    % =====================================================================
+    CO2 = PO2 / (5.08e6 * exp(-498 / Tpe));
+
+    % =====================================================================
+    % STEP 2: Nernst thermodynamic EMF per cell                   [Eq. 21]
+    % Enernst = 1.229 - 8.45e-4*(Tpe-298.15)
+    %         + 4.3085e-5 * Tpe * (ln(PH2) + 0.5*ln(PO2))
+    % =====================================================================
+    Enernst = 1.229 ...
+            - 8.45e-4  * (Tpe - 298.15) ...
+            + 4.3085e-5 * Tpe * (log(PH2) + 0.5*log(PO2));
+
+    % =====================================================================
+    % STEP 3: Activation polarization voltage per cell             [Eq. 22]
+    % vact = -0.9514 + 3.12e-3*Tpe + 7.4e-5*Tpe*ln(CO2)
+    %        - 1.87e-4*Tpe*ln(ipe)
+    % Note: ipe must be > 0 for log to be valid
+    % =====================================================================
+    ipe_safe = max(ipe, 1e-6);   % Guard against log(0)
+
+    vact = -0.9514 ...
+         + 3.12e-3  * Tpe ...
+         + 7.4e-5   * Tpe * log(CO2) ...
+         - 1.87e-4  * Tpe * log(ipe_safe);
+
+    % =====================================================================
+    % STEP 4: Membrane resistivity (Nafion)                        [Eq. 26]
+    % Current density J = ipe / Ape   [A/cm^2] (Ape in cm^2)
+    %
+    % rm = 181.6 * [1 + 0.03*J + 0.062*(Tpe/303)^2 * J^2.5]
+    %            / [(lambda - 0.634 - 3*J) * exp(4.18*(Tpe-303)/Tpe)]
+    %
+    % Units of rm: Ohm*m  (resistivity)
+    % =====================================================================
+    J = ipe_safe / Ape_cm2;    % Current density [A/cm^2]
+
+    rm_num = 181.6 .* (1 + 0.03.*J + 0.062.*(Tpe/303).^2 .* J.^2.5);
+    rm_den = (lambda - 0.634 - 3.*J) .* exp(4.18*(Tpe - 303)/Tpe);
+
+    % Guard against denominator going to zero or negative
+    rm_den  = max(rm_den, 1e-10);
+    rm      = rm_num ./ rm_den;
+
+    % =====================================================================
+    % STEP 5: Ohmic polarization voltage per cell                  [Eq. 23]
+    % vohm = -ipe * (rm*l / Ape + Rc)
+    % rm*l/Ape: Ape in m^2, l in m, rm in Ohm*m  =>  result in Ohm
+    % =====================================================================
+    l_cm = l_mem * 100;
+
+    vohm = -ipe_safe .* (rm .* l_cm ./ Ape_cm2 + Rc);
+
+    % =====================================================================
+    % STEP 6: Concentration polarization voltage per cell          [Eq. 24]
+    % vcon = 0.016 * ln(1 - ipe / (Ape*Jmax))
+    % Ape in cm^2, Jmax in A/cm^2 => Ape*Jmax in A (max current limit)
+    % =====================================================================
+    I_max   = Ape_cm2 * Jmax;                      % Max stack current [A]
+    ratio   = ipe_safe ./ I_max;
+    ratio   = min(ratio, 1 - 1e-6);                % Keep argument of log < 0
+    vcon    = 0.016 .* log(1 - ratio);
+
+    % =====================================================================
+    % STEP 7: Stack output voltage                                 [Eq. 20]
+    % vpe = Npe * (Enernst + vact + vohm + vcon)
+    % Note: vact, vohm, vcon are all negative (losses)
+    % =====================================================================
+    vpe = Npe .* (Enernst + vact + vohm + vcon);
+    vpe = max(vpe, 0);          % Physical lower bound
+
+    % =====================================================================
+    % STEP 8: Stack power output                                   [Eq. 27]
+    % Ppe = vpe * ipe
+    % =====================================================================
+    Ppe = vpe .* ipe;
+
+    % =====================================================================
+    % STEP 9: Hydrogen consumption rate  (Faraday's law)
+    % qH2 = Npe * ipe / (2*F)    [mol/s]
+    % =====================================================================
+    qH2 = Npe .* ipe_safe ./ (2 * F);
+
+end
+================================================================================
+FILE: getPEMFCBoostConverter.m
+================================================================================
+% =========================================================================
+% getPEMFCBoostConverter.m
+% PEMFC Unidirectional Boost Converter State Equations
+% Implements Equation 28 from Zhu et al., Renewable Energy 222 (2024) 119871
+%
+% Inputs:
+%   ipe   : PEMFC inductor/FC current         (A)   [state x4]
+%   Vdc   : DC bus voltage                    (V)   [state x5]
+%   Spe   : Switch signal                     {0,1} [control input]
+%
+% Outputs:
+%   dipe  : d(ipe)/dt                         (A/s)
+%   ip    : Output current injected to DC bus (A)
+%   vpe   : PEMFC stack voltage               (V)
+%   Ppe   : PEMFC output power                (W)
+%   qH2   : Hydrogen consumption rate         (mol/s)
+% =========================================================================
+
+function [dipe, ip, vpe, Ppe, qH2] = getPEMFCBoostConverter(ipe, Vdc, Spe)
+
+    % --- Converter parameter (Table 4, Zhu et al.) ---
+    Lpe     = 01e-3;     % Boost converter inductance  [H]
+
+    % --- PEMFC stack voltage: nonlinear coupling (Eq. 20-26) ---
+    % Clamp current positive; getPEMFC handles its own internal guard
+    ipe_safe        = max(ipe, 0);
+    [vpe, Ppe, qH2] = getPEMFC(ipe_safe);
+
+    % --- State equation (Eq. 28) ---
+    % Lpe * dipe/dt = vpe(ipe) - (1 - Spe) * Vdc
+    dipe    = (vpe - (1 - Spe) * Vdc) / Lpe;
+
+    % --- Output current injected to DC bus ---
+    % ip = (1 - Spe) * ipe
+    ip      = (1 - Spe) * ipe_safe;
+
+end
+================================================================================
+FILE: getPVArray.m
+================================================================================
+% =========================================================================
+% pv_array_model.m
+% PV Array Model - Single Diode with Rs and Rsh
+% Implements Equations 2.2 - 2.8 from reference paper
+%
+% Inputs:
+%   Vpv  : PV array terminal voltage (V) - scalar or vector
+%   G    : Solar irradiance (W/m^2)
+%   T    : Cell temperature (degrees C)
+%   Ns   : Number of PV modules in series per string
+%   Nsh  : Number of parallel strings (Nsh = Np in some notations)
+%
+% Outputs:
+%   Ipv  : PV array output current (A)
+%   Ppv  : PV array output power (W)
+% =========================================================================
+
+function [Ipv, Ppv] = getPVArray(Vpv, G, T, Ns, Nsh)
+
+    % =====================================================================
+    % MODULE PARAMETERS (update from datasheet if different)
+    % These correspond to STC: G = 1000 W/m^2, Tn = 25 C
+    % =====================================================================
+    Vocn    = 47.6;      % Module open-circuit voltage at STC (V)
+    Iscn    = 9.99;      % Module short-circuit current at STC (A)
+    Ncell   = 72;        % Number of cells per module
+
+    % Series resistance and shunt resistance (module level)
+    % These should ideally come from the datasheet or curve fitting.
+    % Typical estimates used here - update if datasheet values are available.
+    Rs      = 0.20;      % Series resistance per module (Ohm)   [Eq. 2.2]
+    Rsh     = 250.0;     % Shunt resistance per module (Ohm)    [Eq. 2.2]
+
+    % Diode and material parameters
+    a       = 1.30;      % Diode ideality factor (dimensionless) [Eq. 2.2]
+    ki      = 0.005;     % Temperature coefficient of Isc (A/C)  [Eq. 2.3]
+                         % Typical: ~0.065% of Isc per degree C
+                         % Update from datasheet (usually listed as mA/C or %/C)
+    Egap    = 1.12;      % Band gap energy of silicon (eV)        [Eq. 2.4]
+
+    % Physical constants
+    q       = 1.602e-19; % Electron charge (C)
+    k       = 1.38e-23;  % Boltzmann constant (J/K)
+
+    % Nominal temperature
+    Tn      = 25;        % Nominal temperature STC (degrees C)
+    Tn_K    = Tn + 273.15; % Nominal temperature in Kelvin
+
+    % =====================================================================
+    % ARRAY-LEVEL EQUIVALENT RESISTANCES         [Eq. 2.8]
+    % Rseq  = (Ns / Nsh) * Rs
+    % Rsheq = (Ns / Nsh) * Rsh
+    % =====================================================================
+    Rseq    = (Ns / Nsh) * Rs;
+    Rsheq   = (Ns / Nsh) * Rsh;
+
+    % =====================================================================
+    % TEMPERATURE CONVERSION
+    % =====================================================================
+    T_K     = T + 273.15; % Operating temperature in Kelvin
+
+    % =====================================================================
+    % THERMAL VOLTAGE (per cell)                 [Eq. 2.6]
+    % Vt = k*T/q  (single cell thermal voltage at operating temperature)
+    % Nominal thermal voltage at STC
+    % =====================================================================
+    Vt      = k * T_K / q;       % Operating thermal voltage (V/cell)
+    Vt_n    = k * Tn_K / q;      % Nominal thermal voltage at STC (V/cell)
+
+    % =====================================================================
+    % PHOTOCURRENT (module level)                [Eq. 2.3]
+    % Iph = (G/1000) * (Isc + ki * (T - Tn))
+    % =====================================================================
+    Iph     = (G / 1000) * (Iscn + ki * (T - Tn));
+
+    % =====================================================================
+    % NOMINAL SATURATION CURRENT at STC          [Eq. 2.5]
+    % Ion = Isc / (exp(Vocn / (a * Ncell * Vt_n)) - 1)
+    % =====================================================================
+    Ion     = Iscn / (exp(Vocn / (a * Ncell * Vt_n)) - 1);
+
+    % =====================================================================
+    % SATURATION CURRENT at operating temperature [Eq. 2.4]
+    % Io = Ion * (T/Tn)^3 * exp((q*Egap)/(k*a) * (1/Tn - 1/T))
+    % =====================================================================
+    Io      = Ion * (T_K / Tn_K)^3 * ...
+              exp( (q * Egap) / (k * a) * (1/Tn_K - 1/T_K) );
+
+    % =====================================================================
+    % SOLVE IMPLICIT ARRAY EQUATION via Newton-Raphson [Eq. 2.7]
+    %
+    % F(Ipv) = Ipv
+    %          - Nsh*Iph
+    %          + Nsh*Io * (exp((Vpv + Ipv*Rseq) / (a*Ns*Ncell*Vt)) - 1)
+    %          + (Vpv + Ipv*Rseq) / Rsheq
+    %        = 0
+    %
+    % dF/dIpv = 1
+    %           + Nsh*Io * Rseq/(a*Ns*Ncell*Vt)
+    %             * exp((Vpv + Ipv*Rseq) / (a*Ns*Ncell*Vt))
+    %           + Rseq / Rsheq
+    % =====================================================================
+
+    % Denominator of diode exponent for the full array
+    Vt_array = a * Ns * Ncell * Vt;  % [V] - thermal voltage scaled for array
+
+    % Newton-Raphson settings
+    maxIter  = 50;
+    tol      = 1e-9;
+
+    % Initial guess: ideal current (no Rs, no Rsh losses)
+    Ipv = Nsh * Iph - Nsh * Io * (exp(Vpv / Vt_array) - 1);
+    Ipv = max(0, Ipv);  % Physical lower bound
+
+    for iter = 1:maxIter
+        exp_term = exp((Vpv + Ipv .* Rseq) / Vt_array);
+
+        % Residual F(Ipv)
+        F  =  Ipv ...
+            - Nsh .* Iph ...
+            + Nsh .* Io .* (exp_term - 1) ...
+            + (Vpv + Ipv .* Rseq) ./ Rsheq;
+
+        % Jacobian dF/dIpv
+        dF = 1 ...
+           + Nsh .* Io .* (Rseq / Vt_array) .* exp_term ...
+           + Rseq / Rsheq;
+
+        % Newton update
+        delta   = F ./ dF;
+        Ipv     = Ipv - delta;
+
+        % Clamp after each iteration
+        Ipv     = max(0, Ipv);
+
+        % Check convergence
+        if max(abs(delta)) < tol
+            break;
+        end
+    end
+
+    % =====================================================================
+    % POWER OUTPUT
+    % =====================================================================
+    Ppv = Vpv .* Ipv;
+
+end
+
+
+
+================================================================================
+FILE: getPVBoostConverter.m
+================================================================================
+% =========================================================================
+% getPVBoostConverter.m
+% PV Unidirectional Boost Converter State Equations
+% Implements Equation 8 from Zhu et al., Renewable Energy 222 (2024) 119871
+%
+% Inputs:
+%   vpv   : PV capacitor voltage              (V)   [state x1]
+%   iL    : Boost inductor current            (A)   [state x2]
+%   Vdc   : DC bus voltage                    (V)   [state x5]
+%   Ss    : Switch signal                     {0,1} [control input]
+%   G     : Solar irradiance                  (W/m^2)
+%   T     : Cell temperature                  (degC)
+%
+% Outputs:
+%   dvpv  : d(vpv)/dt                         (V/s)
+%   diL   : d(iL)/dt                          (A/s)
+%   is    : Output current injected to DC bus (A)
+%   Ppv   : PV array instantaneous power      (W)
+% =========================================================================
+
+function [dvpv, diL, is, Ppv] = getPVBoostConverter(vpv, iL, Vdc, Ss, G, T)
+
+    % --- Converter parameters (Table 4, Zhu et al.) ---
+    Cs  = 2000e-6;      % PV side capacitance     [F]
+    Ls  = 01e-3;       % Boost inductance         [H]
+
+    % --- PV array current: nonlinear coupling (Eq. 8 comment + Eq. 1) ---
+    % getPVArray returns [Ipv, Ppv] at the operating voltage vpv
+    % vpv must be clamped positive before passing to getPVArray
+    vpv_safe        = max(vpv, 0);
+    [ipv, Ppv]      = getPVArray(vpv_safe, G, T, 5, 20);
+
+    % --- State equations (Eq. 8) ---
+    % Cs * dvpv/dt = ipv(vpv) - iL
+    dvpv    = (ipv - iL) / Cs;
+
+    % Ls * diL/dt  = vpv - (1 - Ss) * Vdc
+    diL     = (vpv - (1 - Ss) * Vdc) / Ls;
+
+    % --- Output current injected to DC bus ---
+    % is = (1 - Ss) * iL
+    is      = (1 - Ss) * iL;
+
+end
+================================================================================
+FILE: optimizeDutyCycleGWO.m
+================================================================================
+% =========================================================================
+% optimizeDutyCycleGWO.m
+% Grey Wolf Optimizer for Duty Cycle Optimization
+%
+% This function finds the optimal duty cycle sequence that minimizes a
+% given cost function using the Grey Wolf Optimizer (GWO) metaheuristic.
+%
+% Inputs:
+%   costFunc    : Function handle to the objective/cost function.
+%                 The cost function must accept a row vector of duty cycles
+%                 and return a scalar cost.
+%   dim         : The dimension of the problem (number of duty cycles in a
+%                 sequence, i.e., the prediction horizon Np).
+%   lowerBound  : Lower bound for each duty cycle (scalar).
+%   upperBound  : Upper bound for each duty cycle (scalar).
+%   maxIter     : Maximum number of iterations for the optimizer.
+%   wolfCount   : Number of search agents (wolves).
+%
+% Outputs:
+%   bestSequence : The optimal sequence of duty cycles found (1 x dim).
+%   bestCost     : The minimum cost value corresponding to bestSequence.
+% =========================================================================
+
+function [bestSequence, bestCost] = optimizeDutyCycleGWO(costFunc, dim, lowerBound, upperBound, maxIter, wolfCount)
+
+    % Initialize the positions of the alpha, beta, and delta wolves
+    Alpha_pos   = zeros(1, dim);
+    Alpha_score = inf;
+    Beta_pos    = zeros(1, dim);
+    Beta_score  = inf;
+    Delta_pos   = zeros(1, dim);
+    Delta_score = inf;
+
+    % Initialize the wolf pack positions randomly
+    Positions = lowerBound + (upperBound - lowerBound) * rand(wolfCount, dim);
+
+    % Main loop
+    for iter = 1:maxIter
+        for i = 1:wolfCount
+            % Return wolves that go outside the search space
+            Positions(i,:) = max(Positions(i,:), lowerBound);
+            Positions(i,:) = min(Positions(i,:), upperBound);
+
+            % Calculate objective function for each wolf
+            fitness = costFunc(Positions(i,:));
+
+            % Update Alpha, Beta, and Delta
+            if fitness < Alpha_score, Alpha_score = fitness; Alpha_pos = Positions(i,:); end
+            if fitness > Alpha_score && fitness < Beta_score, Beta_score = fitness; Beta_pos = Positions(i,:); end
+            if fitness > Alpha_score && fitness > Beta_score && fitness < Delta_score, Delta_score = fitness; Delta_pos = Positions(i,:); end
+        end
+
+        a = 2 - iter * (2 / maxIter); % Linearly decreasing 'a' from 2 to 0
+
+        % Update the position of the wolves
+        for i = 1:wolfCount
+            r1 = rand(1, dim); r2 = rand(1, dim); A1 = 2 * a * r1 - a; C1 = 2 * r2;
+            D_alpha = abs(C1 .* Alpha_pos - Positions(i,:)); X1 = Alpha_pos - A1 .* D_alpha;
+
+            r1 = rand(1, dim); r2 = rand(1, dim); A2 = 2 * a * r1 - a; C2 = 2 * r2;
+            D_beta = abs(C2 .* Beta_pos - Positions(i,:)); X2 = Beta_pos - A2 .* D_beta;
+
+            r1 = rand(1, dim); r2 = rand(1, dim); A3 = 2 * a * r1 - a; C3 = 2 * r2;
+            D_delta = abs(C3 .* Delta_pos - Positions(i,:)); X3 = Delta_pos - A3 .* D_delta;
+
+            Positions(i,:) = (X1 + X2 + X3) / 3;
+        end
+    end
+
+    bestSequence = Alpha_pos;
+    bestCost = Alpha_score;
+
+end
+================================================================================
+FILE: runDEMPC.m
+================================================================================
+% =========================================================================
+% runDEMPC.m
+% Main DEMPC Simulation Loop for PV/Hydrogen DC Microgrid
+%
+% Coordinates three local controllers with EMS, following the DEMPC
+% application procedure in Section 3.4, Zhu et al. (2024)
+%
+% Inputs:
+%   x_init        : Initial state [vpv; iL; iae; ipe; Vdc]   (5x1)
+%   t_sim         : Total simulation time                     [s]
+%   G_profile     : Function handle — irradiance G(t)         [W/m^2]
+%   T_profile     : Function handle — temperature T(t)        [degC]
+%   Pload_profile : Function handle — load power Pload(t)     [W]
+%
+% Output:
+%   results : Struct containing all logged signals
+% =========================================================================
+function results = runDEMPC(x_init, t_sim, G_profile, T_profile, Pload_profile)
+
+    % ---- Simulation parameters ----
+    Ts      = 40e-6;                    % Sampling interval     [s]   (Table 3)
+    Ns_ref  = 10;                       % Reference horizon     [-]   (Table 3)
+    Vdc_set = 300;                      % DC bus setpoint       [V]   (Table 4)
+    N_steps = round(t_sim / Ts);        % Total simulation steps
+
+    % ---- PV array config (for Pmax sweep) ----
+    Ns_pv   = 5;
+    Np_pv   = 20;
+    Voc_mod = 47.6;
+    V_sweep = linspace(0.1, Ns_pv * Voc_mod, 500);  % 500-pt MPP sweep
+
+    % =====================================================================
+    % INITIALIZE STATE AND COMMUNICATION VARIABLES
+    % =====================================================================
+    Vdc_ref = Vdc_set;
+    x       = x_init;
+
+    d_prev  = [0.35; 0.22; 0.30; 0.5]; % Adaptive grid initial guesses
+
+    % Initialize communication variables from initial conditions
+    G0  = G_profile(0);   T0 = T_profile(0);
+    vpv0 = x(1);   iL0 = x(2);   iae0 = x(3);   ipe0 = x(4);
+    Vdc0 = x(5);   ib0 = x(6);   SOC0 = x(7);
+
+    [ipv0, ~]           = getPVArray(max(vpv0,0), G0, T0, Ns_pv, Np_pv);
+    Ppv_comm            = max(vpv0, 0) * ipv0;
+    is_comm             = (1 - d_prev(1))  * max(iL0,  0);
+    [~, Pae_comm, NH2_init, ~] = getAE(max(iae0, 1e-6));
+    ia_comm             = d_prev(2) * max(iae0, 0);
+    [~, Ppe_comm, ~]    = getPEMFC(max(ipe0, 1e-6));
+    ip_comm             = (1 - d_prev(3)) * max(ipe0, 0);
+    
+    [Vbat0, ~, Pbat_comm] = getBattery(ib0, SOC0);
+    [~, ib_comm]          = getBidirectionalConverter(ib0, Vbat0, Vdc0, d_prev(4));
+
+    % ---- Initialize Hydrogen Tank ----
+    V_tank   = 0.1;                                 % Volume [m^3]
+    T_tank   = 298.15;                              % Temp [K]
+    R_gas    = 8.31446;                             % Gas constant
+    P_tank0  = 10 * 1e5;                            % Init pressure (10 bar)
+    n_H2     = P_tank0 * V_tank / (R_gas * T_tank); % Init moles
+
+    % =====================================================================
+    % PRE-ALLOCATE RESULTS
+    % =====================================================================
+    t_vec       = (0:N_steps-1)' * Ts;
+    X           = zeros(N_steps, 7);
+    U           = zeros(N_steps, 4);
+    Ppv_log     = zeros(N_steps, 1);
+    Pae_log     = zeros(N_steps, 1);
+    Ppe_log     = zeros(N_steps, 1);
+    Pmax_log    = zeros(N_steps, 1);
+    Pbal_log    = zeros(N_steps, 1);
+    NH2_log     = zeros(N_steps, 1);
+    qH2_log     = zeros(N_steps, 1);
+    Vdc_ref_log = zeros(N_steps, 1);
+    zeta_log    = zeros(N_steps, 2);    % [zeta_a, zeta_p]
+    Ptank_log   = zeros(N_steps, 1);
+    Pbat_log    = zeros(N_steps, 1);
+    SOC_log     = zeros(N_steps, 1);
+
+    fprintf('Running DEMPC: %d steps (Ts=%.0f µs, t_sim=%.3f s)...\n', ...
+            N_steps, Ts*1e6, t_sim);
+    report_every = max(1, round(N_steps/20));
+
+    % =====================================================================
+    % MAIN SIMULATION LOOP  (Section 3.4, Zhu et al.)
+    % =====================================================================
+    for k = 1:N_steps
+
+        t_now   = (k-1) * Ts;
+
+        % --- Current disturbances ---
+        G_now   = G_profile(t_now);
+        T_now   = T_profile(t_now);
+        Pload   = Pload_profile(t_now);
+
+        % --- Unpack current states ---
+        vpv = x(1);   iL  = x(2);
+        iae = x(3);   ipe = x(4);
+        Vdc = x(5);   ib  = x(6);
+        SOC = x(7);
+
+        % =================================================================
+        % STEP 1: Compute PV maximum power Pmax  (Eq. 7)
+        % =================================================================
+        [~, Pp_sw]  = getPVArray(V_sweep, G_now, T_now, Ns_pv, Np_pv);
+        Pmax        = max(Pp_sw);
+
+        % =================================================================
+        % STEP 2: EMS — determine operational modes  (Eq. 32)
+        % =================================================================
+        [zeta_a, zeta_p] = getEMS(Pmax, Pload, SOC);
+
+        % =================================================================
+        % STEP 3: Vdc reference — gradual approach  (Eq. 34)
+        % =================================================================
+        Vdc_ref = Vdc_ref + (1/Ns_ref) * (Vdc_set - Vdc_ref);
+        % Vdc = Vdc_ref + (1/Ns_ref) * (Vdc_set - Vdc);
+
+        % =================================================================
+        % STEP 4: Local DEMPC for PVS  (always active)
+        % =================================================================
+        xs  = [vpv; iL; Vdc];
+        Pload_eff = Pload - Pbat_comm; % Effective load for legacy controllers
+        [d_s_opt, Ppv_comm, is_comm] = getDEMPC_PVS(xs, d_prev(1), Pmax, ...
+            Ppe_comm, Pae_comm, ip_comm, ia_comm, Pload_eff, Vdc_ref, G_now, T_now);
+
+        % =================================================================
+        % STEP 5: Local DEMPC for BESS (always active)
+        % =================================================================
+        xb  = [ib; SOC; Vdc];
+        Pae_comm_temp = 0;
+        Ppe_comm_temp = 0;
+        [d_b_opt, Pbat_comm, ib_comm] = getDEMPC_BESS(xb, d_prev(4), ...
+            Ppv_comm, Ppe_comm_temp, Pae_comm_temp, is_comm, ip_comm, ia_comm, Pload, Vdc_ref);
+
+        % =================================================================
+        % STEP 6: Local DEMPC for AES  (only when EMS activates it)
+        % When off: force iae=0, reset communication to zero
+        % =================================================================
+        if zeta_a == 1
+            xa      = [iae; Vdc];
+            [d_ae_opt, Pae_comm, ia_comm, ~] = getDEMPC_AES(xa, d_prev(2), ...
+                Ppv_comm, Ppe_comm, is_comm, ip_comm, Pload_eff, Vdc_ref);
+        else
+            d_ae_opt = 0;
+            Pae_comm = 0;
+            ia_comm  = 0;
+        end
+
+        % =================================================================
+        % STEP 7: Local DEMPC for PEMFCS  (only when EMS activates it)
+        % When off: force ipe=0, reset communication to zero
+        % =================================================================
+        if zeta_p == 1
+            xp      = [ipe; Vdc];
+            [d_pe_opt, Ppe_comm, ip_comm] = getDEMPC_PEMFCS(xp, d_prev(3), ...
+                Ppv_comm, Pae_comm, is_comm, ia_comm, Pload_eff, Vdc_ref);
+        else
+            d_pe_opt = 0;
+            Ppe_comm = 0;
+            ip_comm  = 0;
+        end
+
+        % =================================================================
+        % STEP 8: Apply optimal control to plant  (forward Euler integration)
+        % =================================================================
+        u   = [d_s_opt; d_ae_opt; d_pe_opt; d_b_opt];
+        w   = [G_now; T_now; Pload];
+
+        Ts_sub  = Ts / 4;
+        for sub = 1:4
+            [xdot, aux] = getMicrogridModel(x, u, w);
+            x           = x + Ts_sub * xdot;
+            x(1)        = max(x(1), 0);
+            x(2)        = max(x(2), 0);
+            x(3)        = max(x(3), 0);
+            x(4)        = max(x(4), 0);
+            x(5)        = max(x(5), 1);
+            x(7)        = max(min(x(7), 1), 0); % Bound SOC between 0 and 1
+        end
+
+        % When subsystem is off, forcefully zero the state (contactor open)
+        if zeta_a == 0
+            x(3) = 0;
+        end
+        if zeta_p == 0
+            x(4) = 0;
+        end
+
+        % =================================================================
+        % STEP 9: Update previous switch signals
+        % =================================================================
+        d_prev = u;
+
+        % =================================================================
+        % STEP 10: Log results
+        % =================================================================
+        % Update Tank state
+        [P_tank, n_H2]  = getHydrogenTank(n_H2, aux.NH2, aux.qH2, Ts);
+
+        X(k,:)          = x';
+        U(k,:)          = u';
+        Ppv_log(k)      = aux.Ppv;
+        Pae_log(k)      = aux.Pae;
+        Ppe_log(k)      = aux.Ppe;
+        Pbal_log(k)     = aux.Pbal;
+        NH2_log(k)      = aux.NH2;
+        qH2_log(k)      = aux.qH2;
+        Pmax_log(k)     = Pmax;
+        Vdc_ref_log(k)  = Vdc_ref;
+        zeta_log(k,:)   = [zeta_a, zeta_p];
+        Ptank_log(k)    = P_tank;
+        Pbat_log(k)     = aux.Pbat;
+        SOC_log(k)      = x(7);
+
+        % Progress report
+        if mod(k, report_every) == 0
+            Perror = aux.Ppv + aux.Ppe + aux.Pbat - Pload - aux.Pae;
+            fprintf('  %3d%% | t=%.4fs | Vdc=%.1fV | Ppv=%.2fkW | Pbat=%.2fkW | Pae=%.2fkW | Pfc=%.2fkW | Perror=%.0fW | EMS=[%d,%d]\n', ...
+                round(100*k/N_steps), t_now, x(5), aux.Ppv/1000, aux.Pbat/1000, aux.Pae/1000, aux.Ppe/1000, Perror, zeta_a, zeta_p);
+        end
+    end
+
+    % =====================================================================
+    % PACKAGE RESULTS
+    % =====================================================================
+    results.t       = t_vec;
+    results.X       = X;           % [vpv, iL, iae, ipe, Vdc, ib, SOC]
+    results.U       = U;           % [Ss, Sae, Spe, Sb]
+    results.Ppv     = Ppv_log;
+    results.Pae     = Pae_log;
+    results.Ppe     = Ppe_log;
+    results.Pmax    = Pmax_log;
+    results.Pbal    = Pbal_log;
+    results.NH2     = NH2_log;
+    results.qH2     = qH2_log;
+    results.Vdc_ref = Vdc_ref_log;
+    results.zeta    = zeta_log;
+    results.Ptank   = Ptank_log;
+    results.Pbat    = Pbat_log;
+    results.SOC     = SOC_log;
+    results.Ts      = Ts;
+    results.total_H2_prod = sum(NH2_log) * Ts; % Total H2 produced [mol]
+    results.total_H2_cons = sum(qH2_log) * Ts; % Total H2 consumed [mol]
+
+    fprintf('Simulation complete.\n');
+end
+================================================================================
+FILE: runDEMPC_GWO.m
+================================================================================
+% =========================================================================
+% runDEMPC_GWO.m
+% Main DEMPC Simulation Loop for PV/Hydrogen DC Microgrid
+%
+% Coordinates three local controllers with EMS, following the DEMPC
+% application procedure in Section 3.4, Zhu et al. (2024)
+%
+% Inputs:
+%   x_init        : Initial state [vpv; iL; iae; ipe; Vdc]   (5x1)
+%   t_sim         : Total simulation time                     [s]
+%   G_profile     : Function handle — irradiance G(t)         [W/m^2]
+%   T_profile     : Function handle — temperature T(t)        [degC]
+%   Pload_profile : Function handle — load power Pload(t)     [W]
+%
+% Output:
+%   results : Struct containing all logged signals
+% =========================================================================
+function results = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profile)
+
+    % ---- Simulation parameters ----
+    Ts      = 40e-6;                    % Sampling interval     [s]   (Table 3)
+    Ns_ref  = 10;                       % Reference horizon     [-]   (Table 3)
+    Vdc_set = 300;                      % DC bus setpoint       [V]   (Table 4)
+    N_steps = round(t_sim / Ts);        % Total simulation steps
+
+    % ---- PV array config (for Pmax sweep) ----
+    Ns_pv   = 5;
+    Np_pv   = 20;
+    Voc_mod = 47.6;
+    V_sweep = linspace(0.1, Ns_pv * Voc_mod, 500);  % 500-pt MPP sweep
+
+    % =====================================================================
+    % INITIALIZE STATE AND COMMUNICATION VARIABLES
+    % =====================================================================
+    Vdc_ref = Vdc_set;
+    x       = x_init;
+
+    d_prev  = [0.35; 0.22; 0.30; 0.5]; % Adaptive grid initial guesses
+
+    % Initialize communication variables from initial conditions
+    G0  = G_profile(0);   T0 = T_profile(0);
+    vpv0 = x(1);   iL0 = x(2);   iae0 = x(3);   ipe0 = x(4);
+    Vdc0 = x(5);   ib0 = x(6);   SOC0 = x(7);
+
+    [ipv0, ~]           = getPVArray(max(vpv0,0), G0, T0, Ns_pv, Np_pv);
+    Ppv_comm            = max(vpv0, 0) * ipv0;
+    is_comm             = (1 - d_prev(1))  * max(iL0,  0);
+    [~, Pae_comm, NH2_init, ~] = getAE(max(iae0, 1e-6));
+    ia_comm             = d_prev(2) * max(iae0, 0);
+    [~, Ppe_comm, ~]    = getPEMFC(max(ipe0, 1e-6));
+    ip_comm             = (1 - d_prev(3)) * max(ipe0, 0);
+    
+    [Vbat0, ~, Pbat_comm] = getBattery(ib0, SOC0);
+    [~, ib_comm]          = getBidirectionalConverter(ib0, Vbat0, Vdc0, d_prev(4));
+
+    % ---- Initialize Hydrogen Tank ----
+    V_tank   = 0.1;                                 % Volume [m^3]
+    T_tank   = 298.15;                              % Temp [K]
+    R_gas    = 8.31446;                             % Gas constant
+    P_tank0  = 10 * 1e5;                            % Init pressure (10 bar)
+    n_H2     = P_tank0 * V_tank / (R_gas * T_tank); % Init moles
+
+    % =====================================================================
+    % PRE-ALLOCATE RESULTS
+    % =====================================================================
+    t_vec       = (0:N_steps-1)' * Ts;
+    X           = zeros(N_steps, 7);
+    U           = zeros(N_steps, 4);
+    Ppv_log     = zeros(N_steps, 1);
+    Pae_log     = zeros(N_steps, 1);
+    Ppe_log     = zeros(N_steps, 1);
+    Pmax_log    = zeros(N_steps, 1);
+    Pbal_log    = zeros(N_steps, 1);
+    NH2_log     = zeros(N_steps, 1);
+    qH2_log     = zeros(N_steps, 1);
+    Vdc_ref_log = zeros(N_steps, 1);
+    zeta_log    = zeros(N_steps, 2);    % [zeta_a, zeta_p]
+    Ptank_log   = zeros(N_steps, 1);
+    Pbat_log    = zeros(N_steps, 1);
+    SOC_log     = zeros(N_steps, 1);
+
+    fprintf('Running GWO-DEMPC: %d steps (Ts=%.0f µs, t_sim=%.3f s)...\n', ...
+            N_steps, Ts*1e6, t_sim);
+    report_every = max(1, round(N_steps/20));
+
+    % =====================================================================
+    % MAIN SIMULATION LOOP  (Section 3.4, Zhu et al.)
+    % =====================================================================
+    for k = 1:N_steps
+
+        t_now   = (k-1) * Ts;
+
+        % --- Current disturbances ---
+        G_now   = G_profile(t_now);
+        T_now   = T_profile(t_now);
+        Pload   = Pload_profile(t_now);
+
+        % --- Unpack current states ---
+        vpv = x(1);   iL  = x(2);
+        iae = x(3);   ipe = x(4);
+        Vdc = x(5);   ib  = x(6);
+        SOC = x(7);
+
+        % =================================================================
+        % STEP 1: Compute PV maximum power Pmax  (Eq. 7)
+        % =================================================================
+        [~, Pp_sw]  = getPVArray(V_sweep, G_now, T_now, Ns_pv, Np_pv);
+        Pmax        = max(Pp_sw);
+
+        % =================================================================
+        % STEP 2: EMS — determine operational modes  (Eq. 32)
+        % =================================================================
+        [zeta_a, zeta_p] = getEMS(Pmax, Pload, SOC);
+
+        % =================================================================
+        % STEP 3: Vdc reference — gradual approach  (Eq. 34)
+        % =================================================================
+        Vdc_ref = Vdc_ref + (1/Ns_ref) * (Vdc_set - Vdc_ref);
+        % Vdc = Vdc_ref + (1/Ns_ref) * (Vdc_set - Vdc);
+
+        % =================================================================
+        % STEP 4: Local DEMPC for PVS  (always active)
+        % =================================================================
+        xs  = [vpv; iL; Vdc];
+        Pload_eff = Pload - Pbat_comm; % Effective load for legacy controllers
+        [d_s_opt, Ppv_comm, is_comm] = getDEMPC_PVS_GWO(xs, Pmax, ...
+            Ppe_comm, Pae_comm, ip_comm, ia_comm, Pload_eff, Vdc_ref, G_now, T_now);
+
+        % =================================================================
+        % STEP 5: Local DEMPC for BESS (always active)
+        % =================================================================
+        xb  = [ib; SOC; Vdc];
+        Pae_comm_temp = 0;
+        Ppe_comm_temp = 0;
+        [d_b_opt, Pbat_comm, ib_comm] = getDEMPC_BESS_GWO(xb, ...
+            Ppv_comm, Ppe_comm_temp, Pae_comm_temp, is_comm, ip_comm, ia_comm, Pload, Vdc_ref);
+
+        % =================================================================
+        % STEP 6: Local DEMPC for AES  (only when EMS activates it)
+        % When off: force iae=0, reset communication to zero
+        % =================================================================
+        if zeta_a == 1
+            xa      = [iae; Vdc];
+            [d_ae_opt, Pae_comm, ia_comm, ~] = getDEMPC_AES_GWO(xa, ...
+                 Ppv_comm, Ppe_comm, is_comm, ip_comm, Pload_eff, Vdc_ref);
+        else
+            d_ae_opt = 0;
+            Pae_comm = 0;
+            ia_comm  = 0;
+        end
+
+        % =================================================================
+        % STEP 7: Local DEMPC for PEMFCS  (only when EMS activates it)
+        % When off: force ipe=0, reset communication to zero
+        % =================================================================
+        if zeta_p == 1
+            xp      = [ipe; Vdc];
+            [d_pe_opt, Ppe_comm, ip_comm] = getDEMPC_PEMFCS_GWO(xp, ...
+                 Ppv_comm, Pae_comm, is_comm, ia_comm, Pload_eff, Vdc_ref);
+        else
+            d_pe_opt = 0;
+            Ppe_comm = 0;
+            ip_comm  = 0;
+        end
+
+        % =================================================================
+        % STEP 8: Apply optimal control to plant  (forward Euler integration)
+        % =================================================================
+        u   = [d_s_opt; d_ae_opt; d_pe_opt; d_b_opt];
+        w   = [G_now; T_now; Pload];
+
+        Ts_sub  = Ts / 4;
+        for sub = 1:4
+            [xdot, aux] = getMicrogridModel(x, u, w);
+            x           = x + Ts_sub * xdot;
+            x(1)        = max(x(1), 0);
+            x(2)        = max(x(2), 0);
+            x(3)        = max(x(3), 0);
+            x(4)        = max(x(4), 0);
+            x(5)        = max(x(5), 1);
+            x(7)        = max(min(x(7), 1), 0); % Bound SOC between 0 and 1
+        end
+
+        % When subsystem is off, forcefully zero the state (contactor open)
+        if zeta_a == 0
+            x(3) = 0;
+        end
+        if zeta_p == 0
+            x(4) = 0;
+        end
+
+        % =================================================================
+        % STEP 9: Update previous switch signals
+        % =================================================================
+        d_prev = u;
+
+        % =================================================================
+        % STEP 10: Log results
+        % =================================================================
+        % Update Tank state
+        [P_tank, n_H2]  = getHydrogenTank(n_H2, aux.NH2, aux.qH2, Ts);
+
+        X(k,:)          = x';
+        U(k,:)          = u';
+        Ppv_log(k)      = aux.Ppv;
+        Pae_log(k)      = aux.Pae;
+        Ppe_log(k)      = aux.Ppe;
+        Pbal_log(k)     = aux.Pbal;
+        NH2_log(k)      = aux.NH2;
+        qH2_log(k)      = aux.qH2;
+        Pmax_log(k)     = Pmax;
+        Vdc_ref_log(k)  = Vdc_ref;
+        zeta_log(k,:)   = [zeta_a, zeta_p];
+        Ptank_log(k)    = P_tank;
+        Pbat_log(k)     = aux.Pbat;
+        SOC_log(k)      = x(7);
+
+        % Progress report
+        if mod(k, report_every) == 0
+            Perror = aux.Ppv + aux.Ppe + aux.Pbat - Pload - aux.Pae;
+            fprintf('  %3d%% | t=%.4fs | Vdc=%.1fV | Ppv=%.2fkW | Pbat=%.2fkW | Pae=%.2fkW | Pfc=%.2fkW | Perror=%.0fW | EMS=[%d,%d]\n', ...
+                round(100*k/N_steps), t_now, x(5), aux.Ppv/1000, aux.Pbat/1000, aux.Pae/1000, aux.Ppe/1000, Perror, zeta_a, zeta_p);
+        end
+    end
+
+    % =====================================================================
+    % PACKAGE RESULTS
+    % =====================================================================
+    results.t       = t_vec;
+    results.X       = X;           % [vpv, iL, iae, ipe, Vdc, ib, SOC]
+    results.U       = U;           % [Ss, Sae, Spe, Sb]
+    results.Ppv     = Ppv_log;
+    results.Pae     = Pae_log;
+    results.Ppe     = Ppe_log;
+    results.Pmax    = Pmax_log;
+    results.Pbal    = Pbal_log;
+    results.NH2     = NH2_log;
+    results.qH2     = qH2_log;
+    results.Vdc_ref = Vdc_ref_log;
+    results.zeta    = zeta_log;
+    results.Ptank   = Ptank_log;
+    results.Pbat    = Pbat_log;
+    results.SOC     = SOC_log;
+    results.Ts      = Ts;
+    results.total_H2_prod = sum(NH2_log) * Ts; % Total H2 produced [mol]
+    results.total_H2_cons = sum(qH2_log) * Ts; % Total H2 consumed [mol]
+
+    fprintf('Simulation complete.\n');
+end
+================================================================================
+FILE: stepMicrogridEnv.m
+================================================================================
+% =========================================================================
+% stepMicrogridEnv.m
+% Reinforcement Learning Environment - Macro Power Model
+%
+% Inputs:
+%   state  : [SOC; Ptank (Pa)]
+%   action : 1 = EMS Idle, 2 = AE ON, 3 = FC ON
+%   prev_action : The action taken in the previous step
+%   Ppv    : Current PV Power (W)
+%   Pload  : Current Load Power (W)
+%   dt     : Time step duration (seconds)
+%
+% Outputs:
+%   next_state : [SOC_new; Ptank_new]
+%   reward     : Reward signal for the RL agent
+%   is_done    : Boolean flag if episode terminates (e.g. failure)
+%   info       : Struct with power logging details
+% =========================================================================
+function [next_state, reward, is_done, info] = stepMicrogridEnv(state, action, prev_action, Ppv, Pload, dt)
+
+    % Unpack State
+    SOC   = state(1);
+    Ptank = state(2);
+
+    % System Parameters
+    P_bat_max = 5000;                % Battery power limit (W)
+    E_bat_max = 240 * 100 * 3600;    % Battery capacity (Joules) -> 240V * 100Ah
+    V_tank    = 0.1;                 % Tank volume (m^3)
+    T_tank    = 298.15;              % Tank temp (K)
+    R_gas     = 8.31446;             % Universal gas constant
+
+    % Calculate initial net power
+    P_net = Ppv - Pload;
+    P_ae = 0; P_fc = 0;
+
+    % Apply Action (Hydrogen Systems)
+    if action == 2 && P_net > 0
+        % AE ON: Greedily absorb surplus up to ~20kW limit
+        P_ae = min(P_net, 20000);
+    elseif action == 3 && P_net < 0
+        % FC ON: Greedily supply deficit up to ~15kW limit
+        P_fc = min(abs(P_net), 15000);
+    end
+
+    % Battery handles the remainder
+    P_rem = P_net - P_ae + P_fc;
+    P_bat = min(max(-P_rem, -P_bat_max), P_bat_max); % Positive = Discharging
+
+    % Calculate any dropped load or wasted power (Mismatch)
+    P_mismatch = abs(P_rem + P_bat);
+
+    % Update States
+    SOC_new = SOC - (P_bat * dt) / E_bat_max;
+    
+    % Simplified Hydrogen Molar Conversion (approx from your models)
+    NH2 = (P_ae / 1000) * 0.0006; % ~0.6 mmol per kW
+    qH2 = (P_fc / 1000) * 0.0012; % ~1.2 mmol per kW
+    
+    n_H2 = (Ptank * V_tank) / (R_gas * T_tank);
+    n_H2_new = max(n_H2 + (NH2 - qH2) * dt, 0);
+    Ptank_new = (n_H2_new * R_gas * T_tank) / V_tank;
+
+    next_state = [SOC_new; Ptank_new];
+
+    % =====================================================================
+    % REWARD FUNCTION (The AI's Objective)
+    % =====================================================================
+    reward = 0;
+    reward = reward - (P_mismatch / 1000) * 5; % -5 points for every kW dropped
+
+    if SOC_new < 0.20 || SOC_new > 0.90
+        reward = reward - 50; % Penalty for leaving safe SOC bounds
+    end
+
+    if action ~= prev_action
+        reward = reward - 10; % Penalty for switching states (Chattering)
+    end
+
+    is_done = (SOC_new <= 0.01 || SOC_new >= 0.99); % Fatal failure
+
+    % Logging info
+    info = struct('Pbat', P_bat, 'Pae', P_ae, 'Pfc', P_fc, 'Pmiss', P_mismatch);
+end
+================================================================================
+FILE: test_comparison.m
+================================================================================
+%% 
+% =========================================================================
+% test_comparison.m
+%
+% Compares the performance of the original DMPC (grid search) against
+% the new DMPC using Grey Wolf Optimization (GWO).
+%
+% This script will:
+% 1. Define the simulation scenario (initial state, duration, disturbances).
+% 2. Run the original 'runDEMPC' simulation.
+% 3. Run the new 'runDEMPC_GWO' simulation.
+% 4. Plot the results of both simulations on the same axes for comparison.
+% =========================================================================
+
+%clear; clc; close all;
+
+% ---- Simulation Scenario ----
+t_sim = 0.8; % Extended to 800ms for full 4-stage profile
+
+% ---- Disturbance Profiles (matching test_DEMPC.m) ----
+% Irradiance: 1000 -> ramp to 1100 -> hold 1100 -> step to 1000 (0.2s intervals)
+G_profile = @(t) 1000 .* (t < 0.2) + ...
+                 (1000 + 100*(t-0.2)/0.2) .* (t >= 0.2 & t < 0.4) + ...
+                 1100 .* (t >= 0.4 & t < 0.6) + ...
+                 1000 .* (t >= 0.6);
+
+% Temperature: fixed
+T_profile = @(t) 25;
+
+% Load: 20kW -> ramp to 40kW -> hold 40kW -> step to 50kW (0.2s intervals)
+Pload_profile = @(t) 20000 .* (t < 0.2) + ...
+                     (20000 + 20000*(t-0.2)/0.2) .* (t >= 0.2 & t < 0.4) + ...
+                     40000 .* (t >= 0.4 & t < 0.6) + ...
+                     50000 .* (t >= 0.6);
+
+% ---- Initial State Calculation (matching test_DEMPC.m) ----
+Ns_pv   = 5;    Np_pv = 20;
+Voc_mod = 47.6;
+G0      = G_profile(0);
+T0      = T_profile(0);
+Vdc_nom = 300;
+
+% Find MPP at t=0 for initial vpv and iL
+V_sw    = linspace(0.1, Ns_pv*Voc_mod, 500);
+[~, Pp] = getPVArray(V_sw, G0, T0, Ns_pv, Np_pv);
+[~, mi] = max(Pp);
+vpv0    = V_sw(mi);
+[Impp0, Ppv0] = getPVArray(vpv0, G0, T0, Ns_pv, Np_pv);
+
+% Compute initial AE current for surplus power
+P_surplus_0 = max(Ppv0 - Pload_profile(0), 0);
+iae_sw      = linspace(0, 500, 5000);
+[vae_sw, ~, ~, ~] = getAE(max(iae_sw,1e-6));
+[~, idx_ae] = min(abs(vae_sw .* iae_sw - P_surplus_0));
+iae_init    = iae_sw(idx_ae);
+
+ib_init  = 0;
+SOC_init = 0.8; % 80% Initial SOC
+x_init   = [vpv0; Impp0; iae_init; 0; Vdc_nom; ib_init; SOC_init];
+
+% =========================================================================
+% RUN SIMULATIONS
+% =========================================================================
+
+% Run the original DMPC with grid search
+fprintf('--- Starting Original DMPC Simulation ---\n');
+results_dempc = runDEMPC(x_init, t_sim, G_profile, T_profile, Pload_profile);
+fprintf('--- Original DMPC Simulation Complete ---\n\n');
+
+% Run the new DMPC with Grey Wolf Optimizer
+fprintf('--- Starting GWO-DMPC Simulation ---\n');
+results_gwo = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profile);
+fprintf('--- GWO-DMPC Simulation Complete ---\n\n');
+
+% =========================================================================
+% PLOT COMPARISON RESULTS
+% =========================================================================
+
+% fprintf('Plotting comparison results...\n');
+
+% % Figure 1: DC Bus Voltage
+% figure('Name', 'DC Bus Voltage Comparison');
+% plot(results_dempc.t, results_dempc.X(:,5), 'b-', 'LineWidth', 1.5);
+% hold on;
+% plot(results_gwo.t, results_gwo.X(:,5), 'r--', 'LineWidth', 1.5);
+% plot(results_dempc.t, results_dempc.Vdc_ref, 'k:', 'LineWidth', 1);
+% grid on;
+% title('DC Bus Voltage (V_{dc})');
+% xlabel('Time (s)');
+% ylabel('Voltage (V)');
+% legend('DMPC (Grid Search)', 'DMPC (GWO)', 'V_{dc} Reference');
+% ylim([270 330]);
+
+% % Figure 2: Power Profiles
+% figure('Name', 'Power Profile Comparison');
+
+% subplot(4,1,1);
+% plot(results_dempc.t, results_dempc.Ppv/1000, 'b-', results_gwo.t, results_gwo.Ppv/1000, 'r--');
+% hold on; plot(results_dempc.t, results_dempc.Pmax/1000, 'g:');
+% grid on; title('PV Power (P_{pv})'); ylabel('Power (kW)');
+% legend('DMPC', 'GWO', 'P_{max}');
+
+% subplot(4,1,2);
+% plot(results_dempc.t, results_dempc.Pae/1000, 'b-', results_gwo.t, results_gwo.Pae/1000, 'r--');
+% grid on; title('Electrolyzer Power (P_{ae})'); ylabel('Power (kW)');
+% legend('DMPC', 'GWO');
+
+% subplot(4,1,3);
+% plot(results_dempc.t, results_dempc.Ppe/1000, 'b-', results_gwo.t, results_gwo.Ppe/1000, 'r--');
+% grid on; title('Fuel Cell Power (P_{pe})'); ylabel('Power (kW)');
+% legend('DMPC', 'GWO');
+
+% subplot(4,1,4);
+% plot(results_dempc.t, results_dempc.Pbat/1000, 'b-', results_gwo.t, results_gwo.Pbat/1000, 'r--');
+% grid on; title('Battery Power (P_{bat})'); ylabel('Power (kW)');
+% xlabel('Time (s)');
+% legend('DMPC', 'GWO');
+
+% % Figure 3: Duty Cycles
+% figure('Name', 'Duty Cycle Comparison');
+
+% subplot(4,1,1);
+% plot(results_dempc.t, results_dempc.U(:,1), 'b-', results_gwo.t, results_gwo.U(:,1), 'r--');
+% grid on; title('PV Duty Cycle (S_s)'); ylabel('Duty Cycle');
+% legend('DMPC', 'GWO');
+
+% subplot(4,1,2);
+% plot(results_dempc.t, results_dempc.U(:,2), 'b-', results_gwo.t, results_gwo.U(:,2), 'r--');
+% grid on; title('AE Duty Cycle (S_{ae})'); ylabel('Duty Cycle');
+% legend('DMPC', 'GWO');
+
+% subplot(4,1,3);
+% plot(results_dempc.t, results_dempc.U(:,3), 'b-', results_gwo.t, results_gwo.U(:,3), 'r--');
+% grid on; title('FC Duty Cycle (S_{pe})'); ylabel('Duty Cycle');
+% legend('DMPC', 'GWO');
+
+% subplot(4,1,4);
+% plot(results_dempc.t, results_dempc.U(:,4), 'b-', results_gwo.t, results_gwo.U(:,4), 'r--');
+% grid on; title('Battery Duty Cycle (S_b)'); ylabel('Duty Cycle');
+% xlabel('Time (s)');
+% legend('DMPC', 'GWO');
+
+% % Figure 4: Hydrogen Tank Pressure
+% figure('Name', 'Hydrogen Tank Pressure Comparison');
+% plot(results_dempc.t, results_dempc.Ptank / 1e5, 'b-', 'LineWidth', 1.5);
+% hold on;
+% plot(results_gwo.t, results_gwo.Ptank / 1e5, 'r--', 'LineWidth', 1.5);
+% grid on;
+% title('Hydrogen Tank Pressure');
+% xlabel('Time (s)');
+% ylabel('Pressure (bar)');
+% legend('DMPC (Grid Search)', 'DMPC (GWO)');
+% xlim([0 t_sim]);
+
+% % Figure 5: Battery SOC Comparison
+% figure('Name', 'Battery SOC Comparison');
+% plot(results_dempc.t, results_dempc.SOC * 100, 'b-', 'LineWidth', 1.5);
+% hold on;
+% plot(results_gwo.t, results_gwo.SOC * 100, 'r--', 'LineWidth', 1.5);
+% grid on;
+% title('Battery State of Charge');
+% xlabel('Time (s)');
+% ylabel('SOC (%)');
+% legend('DMPC (Grid Search)', 'DMPC (GWO)');
+% xlim([0 t_sim]);
+
+% Calculate and display performance metrics
+Vdc_IAE_dempc = sum(abs(results_dempc.X(:,5) - results_dempc.Vdc_ref)) * results_dempc.Ts;
+Vdc_IAE_gwo   = sum(abs(results_gwo.X(:,5) - results_gwo.Vdc_ref)) * results_gwo.Ts;
+
+fprintf('\n--- Performance Metrics ---\n');
+fprintf('Vdc Integral Absolute Error (DMPC): %.4f\n', Vdc_IAE_dempc);
+fprintf('Vdc Integral Absolute Error (GWO):  %.4f\n', Vdc_IAE_gwo);
+fprintf('Total H2 Produced (DMPC): %.6f mol\n', results_dempc.total_H2_prod);
+fprintf('Total H2 Produced (GWO):  %.6f mol\n', results_gwo.total_H2_prod);
+fprintf('Total H2 Consumed (DMPC): %.6f mol\n', results_dempc.total_H2_cons);
+fprintf('Total H2 Consumed (GWO):  %.6f mol\n', results_gwo.total_H2_cons);
+fprintf('Final Tank Pressure (DMPC): %.4f bar\n', results_dempc.Ptank(end) / 1e5);
+fprintf('Final Tank Pressure (GWO):  %.4f bar\n', results_gwo.Ptank(end) / 1e5);
+fprintf('---------------------------\n');
+================================================================================
+FILE: test_DEMPC.m
+================================================================================
+% =========================================================================
+% test_DEMPC.m
+% Closed-loop DEMPC simulation of PV/Hydrogen DC Microgrid
+%
+% Scenario matches paper Section 4:
+%   Irradiance : 1000 W/m^2, ramps to 1100 (0.1-0.2s), drops to 1000 (0.3s)
+%   Load       : 30 kW, steps to 45 kW at t = 0.2s
+%   Vdc setpoint: 300 V
+%
+% Expected behaviour:
+%   t=0 to 0.2s  : Ppv > Pload → AE ON (absorbing surplus), FC OFF
+%   t=0.2s+      : Ppv < Pload → AE OFF, FC ON (supplying deficit)
+% =========================================================================
+clc; clear; close all;
+
+% =========================================================================
+% DISTURBANCE PROFILES
+% =========================================================================
+% Irradiance: 1000 -> ramp to 1100 -> hold 1100 -> step to 1000 (0.2s intervals)
+G_profile = @(t) 1000 .* (t < 0.2) + ...
+                 (1000 + 100*(t-0.2)/0.2) .* (t >= 0.2 & t < 0.4) + ...
+                 1100 .* (t >= 0.4 & t < 0.6) + ...
+                 1000 .* (t >= 0.6);
+
+% Temperature: fixed
+T_profile = @(t) 25;
+
+% Load: 20kW -> ramp to 40kW -> hold 40kW -> step to 50kW (0.2s intervals)
+Pload_profile = @(t) 20000 .* (t < 0.2) + ...
+                     (20000 + 20000*(t-0.2)/0.2) .* (t >= 0.2 & t < 0.4) + ...
+                     40000 .* (t >= 0.4 & t < 0.6) + ...
+                     50000 .* (t >= 0.6);
+
+% =========================================================================
+% INITIAL STATE
+% =========================================================================
+Ns_pv   = 5;    Np_pv = 20;
+Voc_mod = 47.6;
+G0      = G_profile(0);
+T0      = T_profile(0);
+Vdc_nom = 300;
+
+% Find MPP at t=0 for initial vpv and iL
+V_sw    = linspace(0.1, Ns_pv*Voc_mod, 500);
+[~, Pp] = getPVArray(V_sw, G0, T0, Ns_pv, Np_pv);
+[~, mi] = max(Pp);
+vpv0    = V_sw(mi);
+[Impp0, ~] = getPVArray(vpv0, G0, T0, Ns_pv, Np_pv);
+
+% --- Compute initial AE current for surplus power ---
+P_surplus_0 = max(vpv0*Impp0 - Pload_profile(0), 0);
+iae_sw      = linspace(0, 500, 5000);
+vae_sw      = zeros(size(iae_sw));
+for kk = 1:length(iae_sw), [vae_sw(kk),~,~,~] = getAE(max(iae_sw(kk),1e-6)); end
+[~, idx_ae] = min(abs(vae_sw .* iae_sw - P_surplus_0));
+iae_init    = iae_sw(idx_ae);
+
+ib_init  = 0;
+SOC_init = 0.8; % 80% Initial SOC
+x_init   = [vpv0; Impp0; iae_init; 0; Vdc_nom; ib_init; SOC_init];
+
+fprintf('=== DEMPC Simulation Setup ===\n');
+fprintf('  vpv0  = %.2f V\n',   vpv0);
+fprintf('  iL0   = %.2f A\n',   Impp0);
+fprintf('  Ppv0  = %.2f kW\n',  vpv0*Impp0/1000);
+
+% =========================================================================
+% RUN DEMPC  (start with short run to verify, then extend t_sim)
+% =========================================================================
+t_sim   = 0.8;      % Extended to 800ms for full 4-stage profile
+
+tic;
+results = runDEMPC(x_init, t_sim, G_profile, T_profile, Pload_profile);
+elapsed = toc;
+fprintf('Wall-clock time: %.1f s\n', elapsed);
+
+% =========================================================================
+% PLOTS
+% =========================================================================
+t   = results.t * 1000;     % ms
+Pl  = arrayfun(Pload_profile, results.t);
+G_t = arrayfun(G_profile,     results.t);
+
+figure('Color','w','Position',[30 30 1400 900]);
+sgtitle('DEMPC — Closed-Loop PV/Hydrogen DC Microgrid', ...
+        'FontSize', 14, 'FontWeight', 'bold');
+
+% 1. Irradiance and load
+subplot(3,3,1);
+yyaxis left;
+plot(t, G_t, 'b', 'LineWidth', 2); ylabel('G (W/m^2)');
+yyaxis right;
+plot(t, Pl/1000, 'r', 'LineWidth', 2); ylabel('P_{load} (kW)');
+grid on; xlabel('Time (ms)');
+title('Disturbances: Irradiance & Load');
+
+% 2. DC bus voltage
+subplot(3,3,2);
+plot(t, results.X(:,5), 'k', 'LineWidth', 2); hold on;
+plot(t, results.Vdc_ref, 'b--', 'LineWidth', 1.5);
+yline(300, 'r:', 'V_{dc}^*=300V', 'LineWidth', 1.2);
+grid on; xlabel('Time (ms)'); ylabel('V_{dc} (V)');
+title('DC Bus Voltage');
+ylim([270 330]);
+legend('V_{dc}','V_{dc}^{ref}','Location','best');
+
+% 3. Power balance
+subplot(3,3,3);
+plot(t, (results.Ppv+results.Ppe+results.Pbat-results.Pae)/1000, 'b', 'LineWidth', 2); hold on;
+plot(t, Pl/1000, 'r--', 'LineWidth', 2);
+grid on; xlabel('Time (ms)'); ylabel('Power (kW)');
+title('Power Supply vs Demand');
+legend('Supply','P_{load}','Location','best');
+
+% 4. MPPT tracking
+subplot(3,3,4);
+plot(t, results.Ppv/1000, 'b', 'LineWidth', 2); hold on;
+plot(t, results.Pmax/1000, 'r--', 'LineWidth', 1.5);
+grid on; xlabel('Time (ms)'); ylabel('Power (kW)');
+title('PV Power vs P_{max}  (MPPT)');
+legend('P_{pv}','P_{max}','Location','best');
+
+% 5. PV converter states
+subplot(3,3,5);
+yyaxis left;
+plot(t, results.X(:,1), 'b', 'LineWidth', 2);
+ylabel('v_{pv} (V)');
+yyaxis right;
+plot(t, results.X(:,2), 'r', 'LineWidth', 1.5);
+ylabel('i_L (A)');
+grid on; xlabel('Time (ms)');
+title('PV Boost Converter States');
+
+% 6. H2 and Battery Powers
+subplot(3,3,6);
+plot(t, results.Pae/1000, 'r',  'LineWidth', 2); hold on;
+plot(t, results.Ppe/1000, 'g',  'LineWidth', 2);
+plot(t, results.Pbat/1000, 'm',  'LineWidth', 2);
+grid on; xlabel('Time (ms)'); ylabel('Power (kW)');
+title('Storage & H_2 Powers');
+legend('P_{ae} (AE)','P_{pe} (FC)', 'P_{bat}', 'Location','best');
+
+% 7. Switching signals
+subplot(3,3,7);
+stairs(t, results.U(:,1), 'b',  'LineWidth', 1.5); hold on;
+stairs(t, results.U(:,2), 'r',  'LineWidth', 1.5);
+stairs(t, results.U(:,3), 'g',  'LineWidth', 1.5);
+stairs(t, results.U(:,4), 'm',  'LineWidth', 1.5);
+ylim([-0.05, 1.05]); grid on;
+xlabel('Time (ms)'); ylabel('Duty Cycle');
+title('Control Inputs  [d_s, d_{ae}, d_{pe}]');
+legend('d_s','d_{ae}','d_{pe}','d_b','Location','best');
+
+% 8. EMS modes
+subplot(3,3,8);
+stairs(t, results.zeta(:,1), 'r', 'LineWidth', 2); hold on;
+stairs(t, results.zeta(:,2), 'g', 'LineWidth', 2);
+ylim([-0.2, 1.4]); grid on;
+xlabel('Time (ms)'); ylabel('Mode');
+title('EMS Operational Modes');
+legend('\zeta_a (AE on)','\zeta_p (FC on)','Location','best');
+
+% 9. Hydrogen rates
+subplot(3,3,9);
+plot(t, results.NH2*1000, 'g', 'LineWidth', 2); hold on;
+plot(t, results.qH2*1000, 'r', 'LineWidth', 2);
+grid on; xlabel('Time (ms)'); ylabel('Rate (mmol/s)');
+title('H_2 Production (AE) & Consumption (FC)');
+legend('N_{H2}','q_{H2}','Location','best');
+
+% 10. Hydrogen Tank Pressure (New Figure)
+figure('Color','w','Position',[50 50 600 400]);
+plot(t, results.Ptank / 1e5, 'b', 'LineWidth', 2);
+grid on;
+xlabel('Time (ms)');
+ylabel('Pressure (bar)');
+title('Hydrogen Tank Pressure');
+xlim([0 t(end)]);
+
+% figure('Color','w','Position',[30 30 1400 900]);
+% sgtitle('Switching signals', ...
+%         'FontSize', 14, 'FontWeight', 'bold');
+% subplot(3,1,1);
+% stairs(t, results.U(:,1), 'b',  'LineWidth', 1.5);
+% ylim([-0.2, 1.2]); grid on;
+% xlabel('Time (ms)'); ylabel('Switch Signal');
+% title('Control Inputs  [S_s]');
+% legend('S_s','Location','best');
+% 
+% subplot(3,1,2);
+% stairs(t, results.U(:,2), 'r',  'LineWidth', 1.5);
+% ylim([-0.2, 1.2]); grid on;
+% xlabel('Time (ms)'); ylabel('Switch Signal');
+% title('Control Inputs  [S_{ae}]');
+% legend('S_{ae}','Location','best');
+% 
+% subplot(3,1,3);
+% stairs(t, results.U(:,3), 'g',  'LineWidth', 1.5);
+% ylim([-0.2, 1.2]); grid on;
+% xlabel('Time (ms)'); ylabel('Switch Signal');
+% title('Control Inputs  [S_{pe}]');
+% legend('S_{pe}','Location','best');
+
+% =========================================================================
+% PERFORMANCE METRICS
+% =========================================================================
+Vdc_ss  = results.X(:,5);
+Pbal    = results.Pbal;
+
+fprintf('\n=== DEMPC Performance Metrics ===\n');
+fprintf('Vdc mean          : %.3f V   (target 300 V)\n', mean(Vdc_ss));
+fprintf('Vdc std dev       : %.4f V\n',                   std(Vdc_ss));
+fprintf('Vdc max deviation : %.4f V\n',                   max(abs(Vdc_ss-300)));
+fprintf('Power balance RMSE: %.3f kW\n',                  rms(Pbal)/1000);
+fprintf('PV utilization    : %.2f %%\n', ...
+    100*mean(results.Ppv(results.Pmax>0)) / mean(results.Pmax(results.Pmax>0)));
+fprintf('AE active fraction: %.2f %%\n', 100*mean(results.zeta(:,1)));
+fprintf('FC active fraction: %.2f %%\n', 100*mean(results.zeta(:,2)));
+fprintf('Total H2 produced : %.6f mol\n', results.total_H2_prod);
+fprintf('Total H2 consumed : %.6f mol\n', results.total_H2_cons);
+fprintf('Final Tank Press. : %.4f bar\n', results.Ptank(end) / 1e5);
+================================================================================
+FILE: test_GWO_DMPC.m
+================================================================================
+% =========================================================================
+% test_GWO_DMPC.m
+%
+% Runs a closed-loop simulation of the DC Microgrid using the GWO-based
+% Distributed Model Predictive Controller (DMPC).
+%
+% This script will:
+% 1. Define the simulation scenario (initial state, duration, disturbances).
+% 2. Run the 'runDEMPC_GWO' simulation.
+% 3. Plot the key results.
+% =========================================================================
+
+% clear; clc; close all;
+
+% ---- Simulation Scenario ----
+t_sim = 0.8; % Extended to 800ms for full 4-stage profile
+
+% ---- Disturbance Profiles (matching test_DEMPC.m) ----
+% Irradiance: 1000 -> ramp to 1100 -> hold 1100 -> step to 1000 (0.2s intervals)
+G_profile = @(t) 1000 .* (t < 0.2) + ...
+                 (1000 + 100*(t-0.2)/0.2) .* (t >= 0.2 & t < 0.4) + ...
+                 1100 .* (t >= 0.4 & t < 0.6) + ...
+                 1000 .* (t >= 0.6);
+
+% Temperature: fixed
+T_profile = @(t) 25;
+
+% Load: 20kW -> ramp to 40kW -> hold 40kW -> step to 50kW (0.2s intervals)
+Pload_profile = @(t) 20000 .* (t < 0.2) + ...
+                     (20000 + 20000*(t-0.2)/0.2) .* (t >= 0.2 & t < 0.4) + ...
+                     40000 .* (t >= 0.4 & t < 0.6) + ...
+                     50000 .* (t >= 0.6);
+
+% ---- Initial State Calculation (matching test_DEMPC.m) ----
+Ns_pv   = 5;    Np_pv = 20;
+Voc_mod = 47.6;
+G0      = G_profile(0);
+T0      = T_profile(0);
+Vdc_nom = 300;
+
+% Find MPP at t=0 for initial vpv and iL
+V_sw    = linspace(0.1, Ns_pv*Voc_mod, 500);
+[~, Pp] = getPVArray(V_sw, G0, T0, Ns_pv, Np_pv);
+[~, mi] = max(Pp);
+vpv0    = V_sw(mi);
+[Impp0, Ppv0] = getPVArray(vpv0, G0, T0, Ns_pv, Np_pv);
+
+% Compute initial AE current for surplus power
+P_surplus_0 = max(Ppv0 - Pload_profile(0), 0);
+iae_sw      = linspace(0, 500, 5000);
+[vae_sw, ~, ~, ~] = getAE(max(iae_sw,1e-6));
+[~, idx_ae] = min(abs(vae_sw .* iae_sw - P_surplus_0));
+iae_init    = iae_sw(idx_ae);
+
+ib_init  = 0;
+SOC_init = 0.8; % 80% Initial SOC
+x_init   = [vpv0; Impp0; iae_init; 0; Vdc_nom; ib_init; SOC_init];
+
+% =========================================================================
+% RUN SIMULATION
+% =========================================================================
+
+% Run the new DMPC with Grey Wolf Optimizer
+fprintf('--- Starting GWO-DMPC Simulation ---\n');
+tic;
+results_gwo = runDEMPC_GWO(x_init, t_sim, G_profile, T_profile, Pload_profile);
+elapsed_time = toc;
+fprintf('--- GWO-DMPC Simulation Complete (%.2f seconds) ---\n\n', elapsed_time);
+
+% =========================================================================
+% PLOT RESULTS
+% =========================================================================
+
+fprintf('Plotting GWO-DMPC results...\n');
+
+% Figure 1: DC Bus Voltage
+figure('Name', 'GWO-DMPC: DC Bus Voltage');
+plot(results_gwo.t, results_gwo.X(:,5), 'b-', 'LineWidth', 1.5);
+hold on;
+plot(results_gwo.t, results_gwo.Vdc_ref, 'r--', 'LineWidth', 1.5);
+grid on;
+title('DC Bus Voltage (V_{dc})');
+xlabel('Time (s)');
+ylabel('Voltage (V)');
+legend('V_{dc} (GWO)', 'V_{dc} Reference');
+ylim([270 330]);
+
+% Figure 2: Power Profiles
+figure('Name', 'GWO-DMPC: Power Profiles');
+
+subplot(4,1,1);
+plot(results_gwo.t, results_gwo.Ppv/1000, 'b-', 'LineWidth', 1.5);
+hold on; plot(results_gwo.t, results_gwo.Pmax/1000, 'r--', 'LineWidth', 1.5);
+grid on; title('PV Power (P_{pv})'); ylabel('Power (kW)');
+legend('P_{pv} (GWO)', 'P_{max}');
+
+subplot(4,1,2);
+plot(results_gwo.t, results_gwo.Pae/1000, 'b-', 'LineWidth', 1.5);
+grid on; title('Electrolyzer Power (P_{ae})'); ylabel('Power (kW)');
+legend('P_{ae} (GWO)');
+
+subplot(4,1,3);
+plot(results_gwo.t, results_gwo.Ppe/1000, 'b-', 'LineWidth', 1.5);
+grid on; title('Fuel Cell Power (P_{pe})'); ylabel('Power (kW)');
+legend('P_{pe} (GWO)');
+
+subplot(4,1,4);
+plot(results_gwo.t, results_gwo.Pbat/1000, 'm-', 'LineWidth', 1.5);
+grid on; title('Battery Power (P_{bat})'); ylabel('Power (kW)');
+xlabel('Time (s)');
+legend('P_{bat} (GWO)');
+
+% Figure 3: Duty Cycles
+figure('Name', 'GWO-DMPC: Duty Cycles');
+
+subplot(4,1,1);
+stairs(results_gwo.t, results_gwo.U(:,1), 'b-', 'LineWidth', 1.5);
+grid on; title('PV Duty Cycle (S_s)'); ylabel('Duty Cycle');
+legend('d_s (GWO)');
+
+subplot(4,1,2);
+stairs(results_gwo.t, results_gwo.U(:,2), 'b-', 'LineWidth', 1.5);
+grid on; title('AE Duty Cycle (S_{ae})'); ylabel('Duty Cycle');
+legend('d_{ae} (GWO)');
+
+subplot(4,1,3);
+stairs(results_gwo.t, results_gwo.U(:,3), 'b-', 'LineWidth', 1.5);
+grid on; title('FC Duty Cycle (S_{pe})'); ylabel('Duty Cycle');
+legend('d_{pe} (GWO)');
+
+subplot(4,1,4);
+stairs(results_gwo.t, results_gwo.U(:,4), 'm-', 'LineWidth', 1.5);
+grid on; title('Battery Duty Cycle (S_b)'); ylabel('Duty Cycle');
+xlabel('Time (s)');
+legend('d_b (GWO)');
+
+% Figure 4: Hydrogen Tank Pressure
+figure('Name', 'GWO-DMPC: Hydrogen Tank Pressure');
+plot(results_gwo.t, results_gwo.Ptank / 1e5, 'b-', 'LineWidth', 1.5);
+grid on;
+title('Hydrogen Tank Pressure');
+xlabel('Time (s)');
+ylabel('Pressure (bar)');
+xlim([0 results_gwo.t(end)]);
+
+% Figure 5: Battery SOC
+figure('Name', 'GWO-DMPC: Battery SOC');
+plot(results_gwo.t, results_gwo.SOC * 100, 'm-', 'LineWidth', 1.5);
+grid on;
+title('Battery State of Charge');
+xlabel('Time (s)');
+ylabel('SOC (%)');
+xlim([0 results_gwo.t(end)]);
+
+% Calculate and display performance metrics
+Vdc_IAE_gwo   = sum(abs(results_gwo.X(:,5) - results_gwo.Vdc_ref)) * results_gwo.Ts;
+
+fprintf('\n--- GWO-DMPC Performance Metrics ---\n');
+fprintf('Simulation Wall-Clock Time:       %.2f seconds\n', elapsed_time);
+fprintf('Vdc Integral Absolute Error (IAE): %.4f\n', Vdc_IAE_gwo);
+fprintf('Total H2 Produced:                 %.6f mol\n', results_gwo.total_H2_prod);
+fprintf('Total H2 Consumed:                 %.6f mol\n', results_gwo.total_H2_cons);
+fprintf('Final Tank Pressure:               %.4f bar\n', results_gwo.Ptank(end) / 1e5);
+fprintf('-------------------------------------\n');
+================================================================================
+FILE: test_RL_Environment.m
+================================================================================
+% =========================================================================
+% test_RL_Environment.m
+% Demonstrates the RL Macro-Model running a 10-minute simulation instantly.
+% =========================================================================
+clear; clc; close all;
+
+% Simulation settings
+dt = 1;              % 1-second time step
+t_end = 600;         % 10 minutes
+N_steps = t_end / dt;
+
+% Initial State
+SOC0   = 0.50;       % 50% SOC
+Ptank0 = 10 * 1e5;   % 10 bar
+state  = [SOC0; Ptank0];
+
+% Logging arrays
+log_SOC = zeros(N_steps, 1);
+log_Ptnk = zeros(N_steps, 1);
+log_Rwd = zeros(N_steps, 1);
+log_Act = zeros(N_steps, 1);
+
+fprintf('Running 10-Minute RL Environment Test...\n');
+tic;
+
+prev_action = 1;
+for k = 1:N_steps
+    % Simulated Disturbances (Randomized step load and PV)
+    Ppv   = 35000 + 5000 * sin(2*pi*k/300); % PV waving between 30kW and 40kW
+    Pload = 30000 + 15000 * (mod(k, 120) > 60); % Load stepping between 30kW and 45kW
+
+    % THE AGENT'S ACTION (Random for now, later replaced by Neural Network)
+    % 1 = Idle, 2 = AE ON, 3 = FC ON
+    action = randi([1, 3]); 
+
+    % Step the Environment
+    [next_state, reward, is_done, info] = stepMicrogridEnv(state, action, prev_action, Ppv, Pload, dt);
+
+    % Log
+    log_SOC(k) = state(1);
+    log_Ptnk(k)= state(2);
+    log_Rwd(k) = reward;
+    log_Act(k) = action;
+
+    % Transition
+    state = next_state;
+    prev_action = action;
+    if is_done
+        fprintf('Episode terminated early at step %d due to fatal SOC limits!\n', k);
+        break;
+    end
+end
+
+fprintf('Simulation completed in %.4f seconds.\n', toc);
+
+% Plotting the Agent's Experience
+figure('Color', 'w', 'Position', [100 100 800 600]);
+subplot(3,1,1);
+plot(log_SOC * 100, 'm', 'LineWidth', 1.5); title('Battery SOC (%)'); grid on;
+subplot(3,1,2);
+plot(log_Ptnk / 1e5, 'b', 'LineWidth', 1.5); title('Tank Pressure (Bar)'); grid on;
+subplot(3,1,3);
+stairs(log_Act, 'k', 'LineWidth', 1.5); title('Agent Actions (1=Idle, 2=AE, 3=FC)'); 
+yticks([1 2 3]); ylim([0.5 3.5]); grid on;
+xlabel('Time (seconds)');
+================================================================================
+FILE: test_Trained_QLearning.m
+================================================================================
+% =========================================================================
+% test_Trained_QLearning.m
+% Evaluates the fully trained Q-Learning Agent on the Macro Environment.
+% =========================================================================
+clear; clc; close all;
+
+% Load the trained brain (Q-Table)
+if ~isfile('Q_Table_EMS.mat')
+    error('Could not find Q_Table_EMS.mat. Please run train_QLearning_EMS.m first.');
+end
+load('Q_Table_EMS.mat', 'Q');
+
+% Simulation settings
+dt = 1;              % 1-second time step
+t_end = 600;         % 10 minutes
+N_steps = t_end / dt;
+
+% Initial State
+SOC0   = 0.50;       % 50% SOC
+Ptank0 = 10 * 1e5;   % 10 bar
+state  = [SOC0; Ptank0];
+
+% Logging arrays
+log_SOC  = zeros(N_steps, 1);
+log_Ptnk = zeros(N_steps, 1);
+log_Act  = zeros(N_steps, 1);
+log_Pnet = zeros(N_steps, 1);
+
+fprintf('Running 10-Minute Evaluation with Trained AI...\n');
+
+prev_action = 1;
+for k = 1:N_steps
+    % Simulated Disturbances (Same as training)
+    Ppv   = 35000 + 5000 * sin(2*pi*k/300); 
+    Pload = 30000 + 15000 * (mod(k, 120) > 60); 
+    Pnet  = Ppv - Pload;
+    
+    % 1. Convert raw readings into Discrete States (Buckets)
+    SOC = state(1);
+    if SOC < 0.30; s_soc = 1;
+    elseif SOC <= 0.80; s_soc = 2;
+    else; s_soc = 3; end
+    
+    if Pnet < -5000; s_pnet = 1;
+    elseif Pnet <= 5000; s_pnet = 2;
+    else; s_pnet = 3; end
+    
+    % 2. THE AI'S ACTION (100% Exploit, 0% Random)
+    [~, action] = max(Q(s_soc, s_pnet, :));
+
+    % Step the Environment
+    [next_state, ~, is_done, ~] = stepMicrogridEnv(state, action, prev_action, Ppv, Pload, dt);
+
+    % Log
+    log_SOC(k)  = state(1);
+    log_Ptnk(k) = state(2);
+    log_Act(k)  = action;
+    log_Pnet(k) = Pnet;
+
+    % Transition
+    state = next_state;
+    prev_action = action;
+    if is_done
+        fprintf('Episode terminated early at step %d due to fatal SOC limits!\n', k);
+        break;
+    end
+end
+
+% Plotting the Agent's Performance
+figure('Color', 'w', 'Position', [100 100 800 800]);
+subplot(4,1,1); plot(log_Pnet / 1000, 'k', 'LineWidth', 1.5); title('Net Power (PV - Load) [kW]'); grid on;
+subplot(4,1,2); plot(log_SOC * 100, 'm', 'LineWidth', 1.5); title('Battery SOC (%)'); grid on;
+subplot(4,1,3); plot(log_Ptnk / 1e5, 'b', 'LineWidth', 1.5); title('Tank Pressure (Bar)'); grid on;
+subplot(4,1,4); stairs(log_Act, 'r', 'LineWidth', 2); title('AI Actions (1=Idle, 2=AE, 3=FC)'); 
+yticks([1 2 3]); ylim([0.5 3.5]); grid on;
+xlabel('Time (seconds)');
+================================================================================
+FILE: train_QLearning_EMS.m
+================================================================================
+% =========================================================================
+% train_QLearning_EMS.m
+% Trains a Tabular Q-Learning Agent to replace the rule-based EMS.
+% =========================================================================
+clear; clc; close all;
+
+% --- RL Hyperparameters ---
+num_episodes = 500;       % Number of 10-minute training runs
+alpha        = 0.1;       % Learning rate (how fast it updates memory)
+gamma        = 0.95;      % Discount factor (how much it cares about the future)
+epsilon      = 1.0;       % Exploration rate (100% random at start)
+epsilon_min  = 0.05;      % Minimum exploration rate
+epsilon_decay= 0.99;      % Decay rate per episode
+
+% --- Define the Discrete State Space ---
+% To use a Q-Table, we must group continuous numbers into simple buckets.
+% SOC States: 1 = Low (<30%), 2 = Normal (30-80%), 3 = High (>80%)
+% Net Power States: 1 = Deficit (<-5kW), 2 = Balanced (±5kW), 3 = Surplus (>5kW)
+
+num_soc_states  = 3;
+num_pnet_states = 3;
+num_actions     = 3; % 1=Idle, 2=AE, 3=FC
+
+% Initialize the Q-Table (Cheat Sheet) with zeros
+Q = zeros(num_soc_states, num_pnet_states, num_actions);
+
+% Logging
+reward_history = zeros(num_episodes, 1);
+
+fprintf('Starting Q-Learning Training for %d episodes...\n', num_episodes);
+tic;
+
+for episode = 1:num_episodes
+    % Reset Environment for a new 10-minute run
+    dt = 1; N_steps = 600;
+    % Randomize initial SOC between 15% and 95% so the AI explores all states!
+    state = [0.15 + 0.80 * rand(); 10e5]; 
+    prev_action = 1;      % Start Idle
+    total_reward = 0;
+    
+    for k = 1:N_steps
+        % 1. Get Current Disturbances
+        Ppv   = 35000 + 5000 * sin(2*pi*k/300); 
+        Pload = 30000 + 15000 * (mod(k, 120) > 60);
+        Pnet  = Ppv - Pload;
+        
+        % 2. Convert raw readings into Discrete States (Buckets)
+        SOC = state(1);
+        
+        if SOC < 0.30; s_soc = 1;
+        elseif SOC <= 0.80; s_soc = 2;
+        else; s_soc = 3; end
+        
+        if Pnet < -5000; s_pnet = 1;
+        elseif Pnet <= 5000; s_pnet = 2;
+        else; s_pnet = 3; end
+        
+        % 3. Choose Action (Epsilon-Greedy)
+        if rand() < epsilon
+            % Explore: Pick a random action
+            action = randi([1, 3]);
+        else
+            % Exploit: Pick the best action from the Q-Table
+            [~, action] = max(Q(s_soc, s_pnet, :));
+        end
+        
+        % 4. Step the Environment
+        [next_state, reward, is_done, ~] = stepMicrogridEnv(state, action, prev_action, Ppv, Pload, dt);
+        
+        % 5. Get the Next Discrete State
+        next_SOC = next_state(1);
+        if next_SOC < 0.30; next_s_soc = 1;
+        elseif next_SOC <= 0.80; next_s_soc = 2;
+        else; next_s_soc = 3; end
+        
+        % (Pnet for the next step is unknown to the agent, so we assume it stays roughly the same for the Q-update)
+        next_s_pnet = s_pnet; 
+        
+        % 6. Update the Q-Table (The Core Learning Equation)
+        best_future_Q = max(Q(next_s_soc, next_s_pnet, :));
+        current_Q = Q(s_soc, s_pnet, action);
+        
+        Q(s_soc, s_pnet, action) = current_Q + alpha * (reward + gamma * best_future_Q - current_Q);
+        
+        % 7. Transition to next step
+        state = next_state;
+        prev_action = action;
+        total_reward = total_reward + reward;
+        
+        if is_done
+            break; % Grid crashed, end episode early
+        end
+    end
+    
+    % Decay exploration rate so it acts smarter over time
+    epsilon = max(epsilon_min, epsilon * epsilon_decay);
+    reward_history(episode) = total_reward;
+    
+    % Print progress
+    if mod(episode, 50) == 0
+        fprintf('Episode %3d | Total Reward: %6.1f | Epsilon: %.2f\n', episode, total_reward, epsilon);
+    end
+end
+
+fprintf('Training complete in %.2f seconds.\n', toc);
+
+% Plot Learning Curve
+figure('Color','w');
+plot(1:num_episodes, reward_history, 'b', 'LineWidth', 1.5);
+xlabel('Training Episode'); ylabel('Total Reward');
+title('AI Learning Curve (Higher is Better)');
+grid on;
+
+% Save the trained AI brain
+save('Q_Table_EMS.mat', 'Q');
+================================================================================
+FILE: visualizations.m
+================================================================================
+% =========================================================================
+% visualizations.m
+% Generates publication-quality figures comparing FCS-DEMPC and CCS-DEMPC.
+%
+% Assumes the workspace contains:
+%   - results_dempc (from FCS-DEMPC simulation)
+%   - results_gwo   (from CCS-DEMPC simulation)
+% =========================================================================
+
+% Verify that data is loaded
+if ~exist('results_dempc', 'var') || ~exist('results_gwo', 'var')
+    error('Results not found in workspace. Please run test_comparison.m or the individual simulations first.');
+end
+
+close all;
+clc;
+
+t = results_dempc.t;
+
+set(0,'DefaultFigureColor','w')
+
+% Recreate disturbance profiles for plotting
+G_profile = @(t) 1000 .* (t < 0.2) + ...
+                 (1000 + 100*(t-0.2)/0.2) .* (t >= 0.2 & t < 0.4) + ...
+                 1100 .* (t >= 0.4 & t < 0.6) + ...
+                 1000 .* (t >= 0.6);
+
+Pload_profile = @(t) 20000 .* (t < 0.2) + ...
+                     (20000 + 20000*(t-0.2)/0.2) .* (t >= 0.2 & t < 0.4) + ...
+                     40000 .* (t >= 0.4 & t < 0.6) + ...
+                     50000 .* (t >= 0.6);
+
+G_t     = arrayfun(G_profile, t);
+Pload_t = arrayfun(Pload_profile, t) / 1000; % kW
+Pmax_t  = results_dempc.Pmax / 1000;         % kW
+Pnet_t  = Pmax_t - Pload_t;                  % kW
+
+stages = [0.2, 0.4, 0.6]; % Stage boundaries
+
+% =========================================================================
+% FIGURE 1: Simulation Scenario and EMS Response
+% =========================================================================
+f1 = figure('Name', 'Figure 1: Simulation Scenario and EMS Response', 'Position', [100, 100, 800, 700], 'Color', 'w');
+
+% Top Panel: Irradiance and Load
+ax1_1 = subplot(3, 1, 1);
+yyaxis left;
+plot(t, G_t, 'b-', 'LineWidth', 2);
+ylabel('Irradiance G (W/m^2)');
+ylim([900 1200]);
+yyaxis right;
+plot(t, Pload_t, 'r-', 'LineWidth', 2);
+ylabel('Load P_{load} (kW)');
+ylim([15 55]);
+xline(stages, 'k--');
+text(0.1, 52, 'Stage 1', 'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+text(0.3, 52, 'Stage 2', 'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+text(0.5, 52, 'Stage 3', 'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+text(0.7, 52, 'Stage 4', 'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+%title('Disturbance Profiles');
+% text(ax1_1, 0.5, -0.2, '(a) Irradiance and Load profile w.r.t. time', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold')
+text(ax1_1, 0.5, -0.2, '(a)', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold')
+grid on;
+xlim([0, 0.8]);
+
+% Middle Panel: EMS Activation Flags
+ax1_2 =subplot(3, 1, 2);
+stairs(t, results_dempc.zeta(:, 1), 'b-', 'LineWidth', 2); hold on;
+stairs(t, results_dempc.zeta(:, 2), 'r--', 'LineWidth', 2);
+xline(stages, 'k--');
+ylabel('EMS Flags');
+yticks([0 1]);
+ylim([-0.2 1.4]);
+legend('\zeta_a (Electrolyzer)', '\zeta_p (Fuel Cell)', 'Location', 'best');
+%title('EMS Activation Response');
+% text(ax1_2, 0.5, -0.15, '(b) EMS Activation Response', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold')
+text(ax1_2, 0.5, -0.25, '(b)', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold')
+grid on;
+xlim([0, 0.8]);
+
+% Bottom Panel: Net Power (Surplus/Deficit)
+ax1_3 = subplot(3, 1, 3);
+plot(t, Pnet_t, 'k-', 'LineWidth', 1.5); hold on;
+yline(0, 'g-', 'LineWidth', 1.5);
+xline(stages, 'k--');
+xlabel('Time (s)');
+ylabel('Net Power P_{net} (kW)');
+%title('Power Surplus and Deficit (P_{pv,max} - P_{load})');
+% text(ax1_3, 0.5, -0.35, '(c) Net Power (Surplus/Deficit)', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold')
+text(ax1_3, 0.5, -0.37, '(c)', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold')
+grid on;
+xlim([0, 0.8]);
+
+
+% =========================================================================
+% FIGURE 2: DC Bus Voltage Regulation (Full View + Two Zooms)
+% =========================================================================
+f2 = figure('Name', 'Figure 2: DC Bus Voltage Regulation', 'Position', [150, 150, 900, 500], 'Color', 'w');
+ax_main2 = axes('Position', [0.1, 0.1, 0.85, 0.85]);
+
+plot(ax_main2, t, results_dempc.X(:,5), 'b-', 'LineWidth', 1.5); hold on;
+plot(ax_main2, t, results_gwo.X(:,5), 'r--', 'LineWidth', 1.5);
+plot(ax_main2, t, results_dempc.Vdc_ref, 'k:', 'LineWidth', 1.5);
+xline(ax_main2, stages, 'k--');
+
+xlabel('Time (s)');
+ylabel('DC Bus Voltage (V)');
+legend('DMPC', 'Proposed GWO-DMPC', 'V_{dc,ref}', 'Location', 'northwest');
+% text(ax_main2, 0.5, -0.15, 'DC Bus Voltage regulation', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold')
+grid on;
+xlim([0, 0.8]);
+ylim([285, 315]);
+
+% --- Zoom 1 (t = 0.2 s) ---
+xlim1 = [0.185, 0.210];
+idx1 = (t >= xlim1(1) & t <= xlim1(2));
+ymin1 = min([min(results_dempc.X(idx1,5)), min(results_gwo.X(idx1,5)), min(results_dempc.Vdc_ref(idx1))]);
+ymax1 = max([max(results_dempc.X(idx1,5)), max(results_gwo.X(idx1,5)), max(results_dempc.Vdc_ref(idx1))]);
+margin1 = max(0.5, (ymax1 - ymin1) * 0.2);
+
+% Draw bounding box on main axes
+rectangle(ax_main2, 'Position', [xlim1(1), ymin1-margin1, xlim1(2)-xlim1(1), (ymax1+margin1)-(ymin1-margin1)], 'EdgeColor', 'k', 'LineStyle', '-.');
+
+% Create Inset Axes
+ax_ins1 = axes('Position', [0.22, 0.2, 0.2, 0.25]); % Bottom-leftish
+box on; grid on; hold on;
+plot(ax_ins1, t, results_dempc.X(:,5), 'b-', 'LineWidth', 1.5);
+plot(ax_ins1, t, results_gwo.X(:,5), 'r--', 'LineWidth', 1.5);
+plot(ax_ins1, t, results_dempc.Vdc_ref, 'k:', 'LineWidth', 1.5);
+xlim(ax_ins1, xlim1);
+ylim(ax_ins1, [ymin1-margin1, ymax1+margin1]);
+%title(ax_ins1, 'Zoom: 0.18s - 0.28s', 'FontSize', 9);
+
+% --- Zoom 2 (t = 0.6 s) ---
+xlim2 = [0.56, 0.65];
+idx2 = (t >= xlim2(1) & t <= xlim2(2));
+ymin2 = min([min(results_dempc.X(idx2,5)), min(results_gwo.X(idx2,5)), min(results_dempc.Vdc_ref(idx2))]);
+ymax2 = max([max(results_dempc.X(idx2,5)), max(results_gwo.X(idx2,5)), max(results_dempc.Vdc_ref(idx2))]);
+margin2 = max(0.5, (ymax2 - ymin2) * 0.2);
+
+% Draw bounding box on main axes
+rectangle(ax_main2, 'Position', [xlim2(1), ymin2-margin2, xlim2(2)-xlim2(1), (ymax2+margin2)-(ymin2-margin2)], 'EdgeColor', 'k', 'LineStyle', '-.');
+
+% Create Inset Axes
+ax_ins2 = axes('Position', [0.65, 0.2, 0.2, 0.25]); % Bottom-rightish
+box on; grid on; hold on;
+plot(ax_ins2, t, results_dempc.X(:,5), 'b-', 'LineWidth', 1.5);
+plot(ax_ins2, t, results_gwo.X(:,5), 'r--', 'LineWidth', 1.5);
+plot(ax_ins2, t, results_dempc.Vdc_ref, 'k:', 'LineWidth', 1.5);
+xlim(ax_ins2, xlim2);
+ylim(ax_ins2, [ymin2-margin2, ymax2+margin2]);
+%title(ax_ins2, 'Zoom: 0.58s - 0.68s', 'FontSize', 9);
+
+
+% =========================================================================
+% FIGURE 3: Duty Cycle Trajectories
+% =========================================================================
+f3 = figure('Name', 'Figure 3: Duty Cycle Trajectories', 'Position', [200, 100, 800, 800], 'Color', 'w');
+
+% PV Duty Cycle
+ax3_1 = subplot(2, 2, 1);
+stairs(t, results_dempc.U(:,1), 'b-', 'LineWidth', 1.5); hold on;
+plot(t, results_gwo.U(:,1), 'r--', 'LineWidth', 1.5);
+ylabel('d_s');
+%title('PV Duty Cycle');
+% text(ax3_1, 0.5, -0.15, '(a). PV Duty Cycle', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold')
+text(ax3_1, 0.5, -0.15, '(a)', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold')
+grid on; xlim([0, 0.8]); ylim([-0.1 1.1]);
+% lgd1 =legend('DMPC', 'Proposed GWO-DMPC', 'Location', 'northwest');
+% lgd1.FontSize = 6;
+lgd = legend(ax3_1, 'DMPC', 'Proposed GWO-DMPC', 'P_{max}');
+set(lgd, 'Position', [0.18, 0.85, 0.1, 0.05]); % [left, bottom, width, height]
+lgd.FontSize = 6;
+%lgd1.ItemTokenSize = [10, 8];
+%legend boxoff;
+
+% AE Duty Cycle
+ax3_2 = subplot(2, 2, 2);
+stairs(t, results_dempc.U(:,2), 'b-', 'LineWidth', 1.5); hold on;
+plot(t, results_gwo.U(:,2), 'r--', 'LineWidth', 1.5);
+ylabel('d_{ae}');
+lgd = legend(ax3_2, 'DMPC', 'Proposed GWO-DMPC', 'P_{max}');
+set(lgd, 'Position', [0.62, 0.85, 0.1, 0.05]); % [left, bottom, width, height]
+lgd.FontSize = 6;
+% lgd.ItemTokenSize = [8, 8];
+%title('Electrolyzer Duty Cycle');
+% text(ax3_2, 0.5, -0.15, '(b). Electrolyzer Duty Cycle', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold')
+text(ax3_2, 0.5, -0.15, '(b)', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold')
+grid on; xlim([0, 0.8]); ylim([-0.1 1.1]);
+
+% FC Duty Cycle
+ax3_3 = subplot(2, 2, 3);
+stairs(t, results_dempc.U(:,3), 'b-', 'LineWidth', 1.5); hold on;
+plot(t, results_gwo.U(:,3), 'r--', 'LineWidth', 1.5);
+xlabel('Time (s)');
+ylabel('d_{pe}');
+lgd = legend(ax3_3, 'DMPC', 'Proposed GWO-DMPC', 'P_{max}');
+set(lgd, 'Position', [0.22, 0.15, 0.1, 0.05]); % [left, bottom, width, height]
+lgd.FontSize = 6;
+%title('Fuel Cell Duty Cycle');
+% text(ax3_3, 0.5, -0.15, '(c). Fuel Cell Duty Cycle', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold')
+text(ax3_3, 0.5, -0.20, '(c)', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold')
+grid on; xlim([0, 0.8]); ylim([-0.1 1.1]);
+
+% Battery Duty Cycle
+ax3_4 = subplot(2, 2, 4);
+stairs(t, results_dempc.U(:,4), 'b-', 'LineWidth', 1.5); hold on;
+plot(t, results_gwo.U(:,4), 'r--', 'LineWidth', 1.5);
+xlabel('Time (s)');
+ylabel('d_b');
+lgd = legend(ax3_4, 'DMPC', 'Proposed GWO-DMPC', 'P_{max}');
+set(lgd, 'Position', [0.62, 0.115, 0.1, 0.04]); % [left, bottom, width, height]
+lgd.FontSize = 6;
+%title('Battery Duty Cycle');
+% text(ax3_4, 0.5, -0.15, '(d). Battery Duty Cycle', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold')
+text(ax3_4, 0.5, -0.20, '(d)', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold')
+grid on; xlim([0, 0.8]); ylim([-0.1 1.1]);
+
+% --- Zoom on d_s ---
+xlim_ds = [0.19, 0.23];
+idx_ds = (t >= xlim_ds(1) & t <= xlim_ds(2));
+ymin_ds = min([min(results_dempc.U(idx_ds,1)), min(results_gwo.U(idx_ds,1))]);
+ymax_ds = max([max(results_dempc.U(idx_ds,1)), max(results_gwo.U(idx_ds,1))]);
+margin_ds = max(0.05, (ymax_ds - ymin_ds) * 0.1);
+
+rectangle(ax3_1, 'Position', [xlim_ds(1), ymin_ds-margin_ds, xlim_ds(2)-xlim_ds(1), (ymax_ds+margin_ds)-(ymin_ds-margin_ds)], 'EdgeColor', 'k', 'LineStyle', '-.');
+
+pos1 = get(ax3_1, 'Position');
+ax_ins3_1 = axes('Position', [pos1(1)+pos1(3)*0.65, pos1(2)+pos1(4)*0.55, pos1(3)*0.3, pos1(4)*0.35]);
+box on; grid on; hold on;
+stairs(ax_ins3_1, t, results_dempc.U(:,1), 'b-', 'LineWidth', 1.5);
+plot(ax_ins3_1, t, results_gwo.U(:,1), 'r--', 'LineWidth', 1.5);
+xlim(ax_ins3_1, xlim_ds);
+ylim(ax_ins3_1, [ymin_ds-margin_ds, ymax_ds+margin_ds]);
+%title(ax_ins3_1, 'Zoom: 0.19 - 0.23 s', 'FontSize', 8);
+
+% --- Zoom on d_ae ---
+xlim_dae = [0.19, 0.23];
+idx_dae = (t >= xlim_dae(1) & t <= xlim_dae(2));
+ymin_dae = min([min(results_dempc.U(idx_dae,2)), min(results_gwo.U(idx_dae,2))]);
+ymax_dae = max([max(results_dempc.U(idx_dae,2)), max(results_gwo.U(idx_dae,2))]);
+margin_dae = max(0.05, (ymax_dae - ymin_dae) * 0.1);
+
+rectangle(ax3_2, 'Position', [xlim_dae(1), ymin_dae-margin_dae, xlim_dae(2)-xlim_dae(1), (ymax_dae+margin_dae)-(ymin_dae-margin_dae)], 'EdgeColor', 'k', 'LineStyle', '-.');
+
+pos2 = get(ax3_2, 'Position');
+ax_ins3_2 = axes('Position', [pos2(1)+pos2(3)*0.65, pos2(2)+pos2(4)*0.55, pos2(3)*0.3, pos2(4)*0.35]);
+box on; grid on; hold on;
+stairs(ax_ins3_2, t, results_dempc.U(:,2), 'b-', 'LineWidth', 1.5);
+plot(ax_ins3_2, t, results_gwo.U(:,2), 'r--', 'LineWidth', 1.5);
+xlim(ax_ins3_2, xlim_dae);
+ylim(ax_ins3_2, [ymin_dae-margin_dae, ymax_dae+margin_dae]);
+%title(ax_ins3_2, 'Zoom: 0.19 - 0.23 s', 'FontSize', 8);
+
+% --- Zoom on d_pe ---
+xlim_dpe = [0.58, 0.65];
+idx_dpe = (t >= xlim_dpe(1) & t <= xlim_dpe(2));
+ymin_dpe = min([min(results_dempc.U(idx_dpe,3)), min(results_gwo.U(idx_dpe,3))]);
+ymax_dpe = max([max(results_dempc.U(idx_dpe,3)), max(results_gwo.U(idx_dpe,3))]);
+margin_dpe = max(0.05, (ymax_dpe - ymin_dpe) * 0.1);
+
+rectangle(ax3_3, 'Position', [xlim_dpe(1), ymin_dpe-margin_dpe, xlim_dpe(2)-xlim_dpe(1), (ymax_dpe+margin_dpe)-(ymin_dpe-margin_dpe)], 'EdgeColor', 'k', 'LineStyle', '-.');
+
+pos3 = get(ax3_3, 'Position');
+ax_ins3_3 = axes('Position', [pos3(1)+pos3(3)*0.1, pos3(2)+pos3(4)*0.55, pos3(3)*0.3, pos3(4)*0.35]);
+box on; grid on; hold on;
+stairs(ax_ins3_3, t, results_dempc.U(:,3), 'b-', 'LineWidth', 1.5);
+plot(ax_ins3_3, t, results_gwo.U(:,3), 'r--', 'LineWidth', 1.5);
+xlim(ax_ins3_3, xlim_dpe);
+ylim(ax_ins3_3, [ymin_dpe-margin_dpe, ymax_dpe+margin_dpe]);
+%title(ax_ins3_3, 'Zoom: 0.58 - 0.65 s', 'FontSize', 8);
+
+% --- Zoom on d_b ---
+xlim_db = [0.58, 0.65];
+idx_db = (t >= xlim_db(1) & t <= xlim_db(2));
+ymin_db = min([min(results_dempc.U(idx_db,4)), min(results_gwo.U(idx_db,4))]);
+ymax_db = max([max(results_dempc.U(idx_db,4)), max(results_gwo.U(idx_db,4))]);
+margin_db = max(0.05, (ymax_db - ymin_db) * 0.1);
+
+rectangle(ax3_4, 'Position', [xlim_db(1), ymin_db-margin_db, xlim_db(2)-xlim_db(1), (ymax_db+margin_db)-(ymin_db-margin_db)], 'EdgeColor', 'k', 'LineStyle', '-.');
+
+pos4 = get(ax3_4, 'Position');
+ax_ins3_4 = axes('Position', [pos4(1)+pos4(3)*0.1, pos4(2)+pos4(4)*0.55, pos4(3)*0.3, pos4(4)*0.35]);
+box on; grid on; hold on;
+stairs(ax_ins3_4, t, results_dempc.U(:,4), 'b-', 'LineWidth', 1.5);
+plot(ax_ins3_4, t, results_gwo.U(:,4), 'r--', 'LineWidth', 1.5);
+xlim(ax_ins3_4, xlim_db);
+ylim(ax_ins3_4, [ymin_db-margin_db, ymax_db+margin_db]);
+%title(ax_ins3_4, 'Zoom: 0.58 - 0.65 s', 'FontSize', 8);
+
+
+% =========================================================================
+% FIGURE 4: Power Dispatch Comparison
+% =========================================================================
+f4 = figure('Name', 'Figure 4: Power Dispatch Comparison', 'Position', [250, 100, 800, 800], 'Color', 'w');
+
+% PV Power
+ax4_1 = subplot(2, 2, 1);
+plot(t, results_dempc.Ppv / 1000, 'b-', 'LineWidth', 1.5); hold on;
+plot(t, results_gwo.Ppv / 1000, 'r--', 'LineWidth', 1.5);
+plot(t, Pmax_t, 'k:', 'LineWidth', 1.5);
+ylabel('P_{pv} (kW)');
+% lgd = legend('DMPC', 'Proposed GWO-DMPC', 'P_{max}', 'Location', 'NorthWest');
+% lgd.FontSize = 5;
+% lgd.ItemTokenSize = [8, 8];
+% legend boxoff;
+lgd = legend(ax4_1, 'DMPC', 'Proposed GWO-DMPC', 'P_{max}');
+set(lgd, 'Position', [0.15, 0.85, 0.1, 0.05]); % [left, bottom, width, height]
+lgd.FontSize = 5;
+lgd.ItemTokenSize = [8, 8];
+%title('PV Power and MPPT');
+% text(ax4_1, 0.5, -0.15, '(a). PV Power and MPPT', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+text(ax4_1, 0.5, -0.15, '(a)', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+grid on; xlim([0, 0.8]);
+
+% --- Zoom on P_pv ---
+xlim_ppv = [0.19, 0.23];
+idx_ppv = (t >= xlim_ppv(1) & t <= xlim_ppv(2));
+ymin_pv = min([min(results_dempc.Ppv(idx_ppv))/1000, min(results_gwo.Ppv(idx_ppv))/1000, min(Pmax_t(idx_ppv))]);
+ymax_pv = max([max(results_dempc.Ppv(idx_ppv))/1000, max(results_gwo.Ppv(idx_ppv))/1000, max(Pmax_t(idx_ppv))]);
+margin_pv = max(0.5, (ymax_pv - ymin_pv) * 0.1);
+
+rectangle(ax4_1, 'Position', [xlim_ppv(1), ymin_pv-margin_pv, xlim_ppv(2)-xlim_ppv(1), (ymax_pv+margin_pv)-(ymin_pv-margin_pv)], 'EdgeColor', 'k', 'LineStyle', '-.');
+
+pos_ppv = get(ax4_1, 'Position');
+ax_ins4_1 = axes('Position', [pos_ppv(1)+pos_ppv(3)*0.35, pos_ppv(2)+pos_ppv(4)*0.05, pos_ppv(3)*0.32, pos_ppv(4)*0.28]);
+box on; grid on; hold on;
+plot(ax_ins4_1, t, results_dempc.Ppv / 1000, 'b-', 'LineWidth', 1.5);
+plot(ax_ins4_1, t, results_gwo.Ppv / 1000, 'r--', 'LineWidth', 1.5);
+plot(ax_ins4_1, t, Pmax_t, 'k:', 'LineWidth', 1.5);
+xlim(ax_ins4_1, xlim_ppv);
+ylim(ax_ins4_1, [ymin_pv - margin_pv, ymax_pv + margin_pv]);
+%title(ax_ins4_1, 'Zoom: 0.19 - 0.23 s', 'FontSize', 8);
+
+% AE Power
+ax4_2 = subplot(2, 2, 2);
+plot(t, results_dempc.Pae / 1000, 'b-', 'LineWidth', 1.5); hold on;
+plot(t, results_gwo.Pae / 1000, 'r--', 'LineWidth', 1.5);
+ylabel('P_{ae} (kW)');
+lgd = legend('DMPC', 'Proposed GWO-DMPC', 'P_{max}', 'Location', 'NorthWest');
+lgd.FontSize = 6;
+lgd.ItemTokenSize = [10, 8];
+% legend boxoff;
+%title('Electrolyzer Power');
+% text(ax4_2, 0.5, -0.15, '(b). Electrolyzer Power', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+text(ax4_2, 0.5, -0.15, '(b)', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+grid on; xlim([0, 0.8]);
+
+% --- Zoom on P_ae ---
+xlim_pae = [0.19, 0.21];
+idx_pae = (t >= xlim_pae(1) & t <= xlim_pae(2));
+ymin_pae = min([min(results_dempc.Pae(idx_pae)), min(results_gwo.Pae(idx_pae))]) / 1000;
+ymax_pae = max([max(results_dempc.Pae(idx_pae)), max(results_gwo.Pae(idx_pae))]) / 1000;
+margin_pae = max(0.5, (ymax_pae - ymin_pae) * 0.1);
+
+rectangle(ax4_2, 'Position', [xlim_pae(1), ymin_pae-margin_pae, xlim_pae(2)-xlim_pae(1), (ymax_pae+margin_pae)-(ymin_pae-margin_pae)], 'EdgeColor', 'k', 'LineStyle', '-.');
+
+pos_pae = get(ax4_2, 'Position');
+ax_ins4_2 = axes('Position', [pos_pae(1)+pos_pae(3)*0.55, pos_pae(2)+pos_pae(4)*0.55, pos_pae(3)*0.4, pos_pae(4)*0.4]);
+box on; grid on; hold on;
+plot(ax_ins4_2, t, results_dempc.Pae / 1000, 'b-', 'LineWidth', 1.5);
+plot(ax_ins4_2, t, results_gwo.Pae / 1000, 'r--', 'LineWidth', 1.5);
+xlim(ax_ins4_2, xlim_pae);
+ylim(ax_ins4_2, [ymin_pae - margin_pae, ymax_pae + margin_pae]);
+%title(ax_ins4_2, 'Zoom: 0.19 - 0.23 s', 'FontSize', 8);
+
+% FC Power
+ax4_3 = subplot(2, 2, 3);
+plot(t, results_dempc.Ppe / 1000, 'b-', 'LineWidth', 1.5); hold on;
+plot(t, results_gwo.Ppe / 1000, 'r--', 'LineWidth', 1.5);
+xlabel('Time (s)');
+ylabel('P_{pe} (kW)');
+% lgd = legend('DMPC', 'Proposed GWO-DMPC', 'P_{max}', 'Location', 'SouthWest');
+% lgd.FontSize = 5;
+% lgd.ItemTokenSize = [10, 8];
+% legend boxoff;
+lgd = legend(ax4_3, 'DMPC', 'Proposed GWO-DMPC');
+set(lgd, 'Position', [0.15, 0.20, 0.1, 0.03]); % [left, bottom, width, height]
+lgd.FontSize = 5;
+lgd.ItemTokenSize = [8, 8];
+%title('Fuel Cell Power');
+% text(ax4_3, 0.5, -0.15, '(c). Fuel Cell Power', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+text(ax4_3, 0.5, -0.20, '(c)', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+grid on; xlim([0, 0.8]);
+
+% --- Zoom on P_fc ---
+xlim_pfc = [0.58, 0.65];
+idx_pfc = (t >= xlim_pfc(1) & t <= xlim_pfc(2));
+ymin_p = min([min(results_dempc.Ppe(idx_pfc)), min(results_gwo.Ppe(idx_pfc))]) / 1000;
+ymax_p = max([max(results_dempc.Ppe(idx_pfc)), max(results_gwo.Ppe(idx_pfc))]) / 1000;
+margin_p = max(0.5, (ymax_p - ymin_p) * 0.1);
+
+rectangle(ax4_3, 'Position', [xlim_pfc(1), ymin_p-margin_p, xlim_pfc(2)-xlim_pfc(1), (ymax_p+margin_p)-(ymin_p-margin_p)], 'EdgeColor', 'k', 'LineStyle', '-.');
+
+pos_pfc = get(ax4_3, 'Position');
+ax_ins4_3 = axes('Position', [pos_pfc(1)+pos_pfc(3)*0.1, pos_pfc(2)+pos_pfc(4)*0.55, pos_pfc(3)*0.4, pos_pfc(4)*0.4]);
+box on; grid on; hold on;
+plot(ax_ins4_3, t, results_dempc.Ppe / 1000, 'b-', 'LineWidth', 1.5);
+plot(ax_ins4_3, t, results_gwo.Ppe / 1000, 'r--', 'LineWidth', 1.5);
+xlim(ax_ins4_3, xlim_pfc);
+ylim(ax_ins4_3, [ymin_p - margin_p, ymax_p + margin_p]);
+%title(ax_ins4_3, 'Zoom: 0.58 - 0.65 s', 'FontSize', 8);
+
+% Battery Power
+ax4_4 = subplot(2, 2, 4);
+plot(t, results_dempc.Pbat / 1000, 'b-', 'LineWidth', 1.5); hold on;
+plot(t, results_gwo.Pbat / 1000, 'r--', 'LineWidth', 1.5);
+xlabel('Time (s)');
+ylabel('P_{bat} (kW)');
+% lgd = legend('DMPC', 'Proposed GWO-DMPC', 'P_{max}', 'Location', 'SouthWest');
+% lgd.FontSize = 5;
+% lgd.ItemTokenSize = [10, 8];
+% legend boxoff;
+lgd4 = legend(ax4_4, 'DMPC', 'Proposed GWO-DMPC');
+set(lgd4, 'Position', [0.59, 0.2, 0.1, 0.03]); % [left, bottom, width, height]
+lgd4.FontSize = 5;
+lgd4.ItemTokenSize = [8, 8];
+%title('Battery Power');
+% text(ax4_4, 0.5, -0.15, '(d). Battery Power', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+text(ax4_4, 0.5, -0.20, '(d)', 'Units', 'normalized', 'HorizontalAlignment', 'center', 'FontWeight', 'bold');
+grid on; xlim([0, 0.8]);
+
+% --- Zoom on P_bat ---
+xlim_pbat = [0.58, 0.65];
+idx_pbat = (t >= xlim_pbat(1) & t <= xlim_pbat(2));
+ymin_p = min([min(results_dempc.Pbat(idx_pbat)), min(results_gwo.Pbat(idx_pbat))]) / 1000;
+ymax_p = max([max(results_dempc.Pbat(idx_pbat)), max(results_gwo.Pbat(idx_pbat))]) / 1000;
+margin_p = max(0.5, (ymax_p - ymin_p) * 0.1);
+
+rectangle(ax4_4, 'Position', [xlim_pbat(1), ymin_p-margin_p, xlim_pbat(2)-xlim_pbat(1), (ymax_p+margin_p)-(ymin_p-margin_p)], 'EdgeColor', 'k', 'LineStyle', '-.');
+
+pos_pbat = get(ax4_4, 'Position');
+ax_ins4_4 = axes('Position', [pos_pbat(1)+pos_pbat(3)*0.1, pos_pbat(2)+pos_pbat(4)*0.55, pos_pbat(3)*0.4, pos_pbat(4)*0.4]);
+box on; grid on; hold on;
+plot(ax_ins4_4, t, results_dempc.Pbat / 1000, 'b-', 'LineWidth', 1.5);
+plot(ax_ins4_4, t, results_gwo.Pbat / 1000, 'r--', 'LineWidth', 1.5);
+xlim(ax_ins4_4, xlim_pbat);
+ylim(ax_ins4_4, [ymin_p - margin_p, ymax_p + margin_p]);
+%title(ax_ins4_4, 'Zoom: 0.58 - 0.65 s', 'FontSize', 8);
+
+
+% =========================================================================
+% FIGURE 5: Battery SOC and Hydrogen Tank Pressure
+% =========================================================================
+f5 = figure('Name', 'Figure 5: Energy Storage States', 'Position', [300, 200, 800, 500], 'Color', 'w');
+
+% Battery SOC
+subplot(2, 1, 1);
+plot(t, results_dempc.SOC * 100, 'b-', 'LineWidth', 2); hold on;
+plot(t, results_gwo.SOC * 100, 'r--', 'LineWidth', 2);
+yline(90, 'k--', 'Upper Limit (90%)', 'LabelHorizontalAlignment', 'left', 'LineWidth', 1.2);
+yline(20, 'k--', 'Lower Limit (20%)', 'LabelHorizontalAlignment', 'left', 'LineWidth', 1.2);
+xline(stages, 'k:');
+ylabel('SOC (%)');
+%title('Battery State of Charge');
+legend('DMPC', 'Proposed GWO-DMPC', 'Location', 'best');
+grid on; xlim([0, 0.8]);
+
+% Hydrogen Tank Pressure
+subplot(2, 1, 2);
+plot(t, results_dempc.Ptank / 1e5, 'b-', 'LineWidth', 2); hold on;
+plot(t, results_gwo.Ptank / 1e5, 'r--', 'LineWidth', 2);
+xline(stages, 'k:');
+xlabel('Time (s)');
+ylabel('Pressure (bar)');
+%title('Hydrogen Tank Pressure');
+grid on; xlim([0, 0.8]);
+
+
+% =========================================================================
+% Export Figures
+% =========================================================================
+% fprintf('Saving figures to PDF (500 DPI)...\n');
+% exportgraphics(f1, 'Figure_1_Scenario_EMS.jpeg', 'ContentType', 'vector', 'Resolution', 500);
+% exportgraphics(f2, 'Figure_2_DC_Bus_Voltage.jpeg', 'ContentType', 'vector', 'Resolution', 500);
+% exportgraphics(f3, 'Figure_3_Duty_Cycles.jpeg', 'ContentType', 'vector', 'Resolution', 500);
+% exportgraphics(f4, 'Figure_4_Power_Dispatch.jpeg', 'ContentType', 'vector', 'Resolution', 500);
+% exportgraphics(f5, 'Figure_5_Energy_Storage.jpeg', 'ContentType', 'vector', 'Resolution', 500);
+
+
+% =========================================================================
+% Console Notification
+% =========================================================================
+% fprintf('All visualizations generated successfully.\n');
+% fprintf(' - Figure 1: Scenario & EMS\n');
+% fprintf(' - Figure 2: DC Bus Voltage Regulation\n');
+% fprintf(' - Figure 3: Duty Cycle Trajectories\n');
+% fprintf(' - Figure 4: Power Dispatch\n');
+% fprintf(' - Figure 5: Energy Storage States\n');
