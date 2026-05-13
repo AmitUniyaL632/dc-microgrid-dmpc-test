@@ -9,7 +9,7 @@
 % Reference: Zhu et al., Renewable Energy 222 (2024) 119871
 %            Equations 8, 10, 13, 28
 %
-% State vector x (7x1):
+% State vector x (9x1):
 %   x(1) = vpv   : PV capacitor voltage          [V]
 %   x(2) = iL    : PV boost inductor current      [A]
 %   x(3) = iae   : AE buck inductor/AE current    [A]
@@ -17,20 +17,24 @@
 %   x(5) = Vdc   : DC bus voltage                 [V]
 %   x(6) = ib    : Battery inductor current       [A]
 %   x(7) = SOC   : Battery State of Charge        [-]
+%   x(8) = vwt   : WTG capacitor voltage          [V]
+%   x(9) = iLw   : WTG boost inductor current     [A]
 %
-% Control vector u (4x1):
+% Control vector u (5x1):
 %   u(1) = Ss    : PV boost switch signal         {0,1}
 %   u(2) = Sae   : AE buck switch signal          {0,1}
 %   u(3) = Spe   : PEMFC boost switch signal      {0,1}
 %   u(4) = Sb    : Battery bidirectional switch   {0,1}
+%   u(5) = Sw    : WTG boost switch signal        {0,1}
 %
-% Disturbance vector w (3x1):
+% Disturbance vector w (4x1):
 %   w(1) = G     : Solar irradiance               [W/m^2]
 %   w(2) = T     : PV cell temperature            [degC]
 %   w(3) = Pload : Load power demand              [W]
+%   w(4) = v_w   : Wind speed                     [m/s]
 %
 % Outputs:
-%   xdot  : State derivative vector (7x1)         [mixed units/s]
+%   xdot  : State derivative vector (9x1)         [mixed units/s]
 %   aux   : Auxiliary signals struct for monitoring and MPC cost function
 %             .Ppv   : PV array power             [W]
 %             .Pae   : AE power consumed          [W]
@@ -62,6 +66,8 @@ function [xdot, aux] = getMicrogridModel(x, u, w)
     Vdc     = x(5);
     ib      = x(6);
     SOC     = x(7);
+    vwt     = x(8);
+    iLw     = x(9);
 
     % =====================================================================
     % UNPACK CONTROL VECTOR
@@ -70,6 +76,7 @@ function [xdot, aux] = getMicrogridModel(x, u, w)
     Sae     = u(2);
     Spe     = u(3);
     Sb      = u(4);
+    Sw      = u(5);
 
     % =====================================================================
     % UNPACK DISTURBANCE VECTOR
@@ -77,6 +84,7 @@ function [xdot, aux] = getMicrogridModel(x, u, w)
     G       = w(1);
     T       = w(2);
     Pload   = w(3);
+    v_w     = w(4);
 
     % =====================================================================
     % SUBSYSTEM 1: PV Boost Converter                            [Eq. 8]
@@ -118,11 +126,18 @@ function [xdot, aux] = getMicrogridModel(x, u, w)
     [dib, ib_bus]      = getBidirectionalConverter(ib, Vbat, Vdc, Sb);
 
     % =====================================================================
-    % SUBSYSTEM 5: DC Bus                                        [Eq. 10]
-    % State updated: x(5)=Vdc
-    % Receives is, ip, ib_bus from generators/storage and ia, il as sinks
+    % SUBSYSTEM 5: WTG Boost Converter
+    % States updated: x(8)=vwt, x(9)=iLw
+    % Also produces: iw (current injected to DC bus), Pwt
     % =====================================================================
-    [dVdc, il] = getDCBus(Vdc, is, ip, ia, ib_bus, Pload);
+    [dvwt, diLw, iw, Pwt] = getWTGBoostConverter(vwt, iLw, Vdc, Sw, v_w);
+
+    % =====================================================================
+    % SUBSYSTEM 6: DC Bus                                        [Eq. 10]
+    % State updated: x(5)=Vdc
+    % Receives is, ip, ib_bus, iw from generators/storage and ia, il as sinks
+    % =====================================================================
+    [dVdc, il] = getDCBus(Vdc, is, ip, ia, ib_bus, Pload, iw);
 
     % =====================================================================
     % ASSEMBLE STATE DERIVATIVE VECTOR
@@ -133,12 +148,15 @@ function [xdot, aux] = getMicrogridModel(x, u, w)
                dipe;    % dx(4)/dt
                dVdc;    % dx(5)/dt
                dib;     % dx(6)/dt
-               dSOC];   % dx(7)/dt
+               dSOC;    % dx(7)/dt
+               dvwt;    % dx(8)/dt
+               diLw];   % dx(9)/dt
 
     % =====================================================================
     % AUXILIARY OUTPUTS  (for MPC cost function and monitoring)
     % =====================================================================
     aux.Ppv     = Ppv;
+    aux.Pwt     = Pwt;
     aux.Pae     = Pae;
     aux.Ppe     = Ppe;
     aux.Pbat    = Pbat;
@@ -149,10 +167,11 @@ function [xdot, aux] = getMicrogridModel(x, u, w)
     aux.Vbat    = Vbat;
     aux.SOC     = SOC;
     aux.is      = is;
+    aux.iw      = iw;
     aux.ia      = ia;
     aux.ip      = ip;
     aux.ib_bus  = ib_bus;
     aux.il      = il;
-    aux.Pbal    = (Ppv + Ppe + Pbat) - (Pae + Pload);  % Power balance error [W]
+    aux.Pbal    = (Ppv + Pwt + Ppe + Pbat) - (Pae + Pload);  % Power balance error [W]
 
 end

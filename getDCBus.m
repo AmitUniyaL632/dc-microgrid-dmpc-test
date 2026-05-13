@@ -10,6 +10,7 @@
 %   ia    : AE converter input current        (A)   [from getAEBuckConverter]
 %   ib_bus: Battery converter output current  (A)   [from getBidirectionalConverter]
 %   Pload : Load power demand                 (W)   [disturbance]
+%   iw    : WTG converter output current      (A)   [from getWTGBoostConverter]
 %
 % Output:
 %   dVdc  : d(Vdc)/dt                         (V/s)
@@ -21,9 +22,15 @@ function [dVdc, il] = getDCBus(Vdc, is, ip, ia, varargin)
     if nargin == 5
         ib_bus = 0;
         Pload  = varargin{1};
+        iw     = 0;
+    elseif nargin == 6
+        ib_bus = varargin{1};
+        Pload  = varargin{2};
+        iw     = 0;
     else
         ib_bus = varargin{1};
         Pload  = varargin{2};
+        iw     = varargin{3};
     end
 
     % --- DC bus parameter (Table 4, Zhu et al.) ---
@@ -35,8 +42,8 @@ function [dVdc, il] = getDCBus(Vdc, is, ip, ia, varargin)
     il          = Pload / Vdc_safe;
 
     % --- DC bus state equation (Eq. 10) ---
-    % Cdc * dVdc/dt = is + ip + ib_bus - ia - il
-    dVdc    = (is + ip + ib_bus - ia - il) / Cdc;
+    % Cdc * dVdc/dt = is + ip + ib_bus + iw - ia - il
+    dVdc    = (is + ip + ib_bus + iw - ia - il) / Cdc;
 
 end
 %%
